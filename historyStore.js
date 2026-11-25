@@ -5,6 +5,46 @@ import GdkPixbuf from 'gi://GdkPixbuf';
 const THUMB_MAX_WIDTH = 240;
 const THUMB_MAX_HEIGHT = 96;
 const MAX_TEXT_LENGTH = 512 * 1024; // 512K chars cap so huge accidental text copies never stall JSON serialization
+const UNDO_TTL_MS = 15_000;
+
+const HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const FUNC_COLOR_RE = /^(rgba?|hsla?)\(\s*[\d.%+\-,\s/]+\s*\)$/i;
+const URL_RE = /^https?:\/\/\S+$/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CODE_HINT_RE = /(^\s*(import |export |function |const |let |var |class |def |async |return |if\s*\(|for\s*\(|while\s*\(|SELECT |INSERT |UPDATE |DELETE |CREATE |#!\/|<\/?[a-z][\w-]*[\s>])|=>|;\s*$|{\s*$)/m;
+
+export function classifyText(text) {
+    const trimmed = text.trim();
+    if (HEX_COLOR_RE.test(trimmed) || FUNC_COLOR_RE.test(trimmed))
+        return {subtype: 'color', colorValue: trimmed, isUrl: false, isJson: false};
+    if (URL_RE.test(trimmed))
+        return {subtype: 'url', colorValue: null, isUrl: true, isJson: false};
+    if (EMAIL_RE.test(trimmed))
+        return {subtype: 'email', colorValue: null, isUrl: false, isJson: false};
+
+    if (trimmed.length <= 65536 &&
+        ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+         (trimmed.startsWith('[') && trimmed.endsWith(']')))) {
+        try {
+            JSON.parse(trimmed);
+            return {subtype: 'code', colorValue: null, isUrl: false, isJson: true};
+        } catch {
+            // fall through to heuristic code check
+        }
+    }
+
+    if (CODE_HINT_RE.test(trimmed))
+        return {subtype: 'code', colorValue: null, isUrl: false, isJson: false};
+
+    return {subtype: 'text', colorValue: null, isUrl: false, isJson: false};
+}
+
+function countWords(text) {
+    const trimmed = text.trim();
+    if (!trimmed)
+        return 0;
+    return trimmed.split(/\s+/).length;
+}
 
 const MIME_TO_EXT = {
     'image/png': 'png',
@@ -332,6 +372,8 @@ export class HistoryStore {
     #destroyed = false;
     #decoder = new TextDecoder('utf-8');
     #encoder = new TextEncoder();
+    #undoBatch = null;
+    #undoTimerId = 0;
 
     constructor({uuid, cacheDir = null, config = {}, onChanged = null}) {
         this.#cacheDir = cacheDir ?? GLib.build_filenamev([GLib.get_user_cache_dir(), uuid]);
@@ -352,8 +394,51 @@ export class HistoryStore {
         return this.#cacheDir;
     }
 
+    get imagesDir() {
+        return this.#imagesDir;
+    }
+
+    get thumbsDir() {
+        return this.#thumbsDir;
+    }
+
     get entries() {
         return this.#entries;
+    }
+
+    get canUndo() {
+        return Boolean(this.#undoBatch && this.#undoBatch.length > 0);
+    }
+
+    getEntry(id) {
+        return this.#entries.find(e => e.id === id) ?? null;
+    }
+
+    getImagePath(entry) {
+        if (!entry || entry.type !== 'image' || !entry.imageFile)
+            return null;
+        return GLib.build_filenamev([this.#imagesDir, entry.imageFile]);
+    }
+
+    getThumbPath(entry) {
+        if (!entry || entry.type !== 'image')
+            return null;
+        if (entry.thumbFile)
+            return GLib.build_filenamev([this.#thumbsDir, entry.thumbFile]);
+        return this.getImagePath(entry);
+    }
+
+    getSerializableEntries() {
+        return this.#entries.map(entry => {
+            if (entry.type === 'image') {
+                return {
+                    ...entry,
+                    imagePath: this.getImagePath(entry),
+                    thumbPath: this.getThumbPath(entry),
+                };
+            }
+            return {...entry};
+        });
     }
 
     setConfig(partial) {
@@ -415,14 +500,37 @@ export class HistoryStore {
         if (this.#destroyed)
             return;
 
-        this.#entries = this.#entries.filter(e => e.type !== 'image' || imageNames.has(e.imageFile));
+        this.#entries = this.#entries
+            .filter(e => e.type !== 'image' || imageNames.has(e.imageFile))
+            .map(e => this.#normalizeEntry(e));
         this.#sortEntries();
         this.#enforceLimits();
         await this.pruneOrphanFiles();
         this.#emitChanged();
     }
 
-    async addText(text) {
+    #normalizeEntry(entry) {
+        if (entry.type === 'text') {
+            const cls = classifyText(entry.text);
+            return {
+                ...entry,
+                subtype: entry.subtype ?? cls.subtype,
+                colorValue: entry.colorValue ?? cls.colorValue,
+                isUrl: typeof entry.isUrl === 'boolean' ? entry.isUrl : cls.isUrl,
+                isJson: typeof entry.isJson === 'boolean' ? entry.isJson : cls.isJson,
+                wordCount: typeof entry.wordCount === 'number' ? entry.wordCount : countWords(entry.text),
+                sourceApp: entry.sourceApp ?? null,
+                pinned: Boolean(entry.pinned),
+            };
+        }
+        return {
+            ...entry,
+            sourceApp: entry.sourceApp ?? null,
+            pinned: Boolean(entry.pinned),
+        };
+    }
+
+    async addText(text, {sourceApp = null} = {}) {
         if (this.#destroyed || typeof text !== 'string')
             return null;
 
@@ -438,16 +546,24 @@ export class HistoryStore {
         if (existingIdx !== -1) {
             entry = this.#entries.splice(existingIdx, 1)[0];
             entry.updatedAt = now;
+            if (sourceApp)
+                entry.sourceApp = sourceApp;
         } else {
             const lines = clipped.split(/\r?\n/);
+            const cls = classifyText(clipped);
             entry = {
                 id: `${now}-${hash.slice(0, 8)}`,
                 type: 'text',
+                subtype: cls.subtype,
+                colorValue: cls.colorValue,
                 hash,
                 text: clipped,
                 charCount: clipped.length,
+                wordCount: countWords(clipped),
                 lineCount: lines.length,
-                isUrl: /^https?:\/\/\S+$/i.test(clipped.trim()),
+                isUrl: cls.isUrl,
+                isJson: cls.isJson,
+                sourceApp,
                 pinned: false,
                 updatedAt: now,
             };
@@ -461,7 +577,47 @@ export class HistoryStore {
         return entry;
     }
 
-    async addImage(glibBytes, mimeType) {
+    updateText(id, newText) {
+        if (this.#destroyed || typeof newText !== 'string' || newText.trim().length === 0)
+            return null;
+
+        const idx = this.#entries.findIndex(e => e.id === id && e.type === 'text');
+        if (idx === -1)
+            return null;
+
+        const clipped = newText.length > MAX_TEXT_LENGTH ? newText.slice(0, MAX_TEXT_LENGTH) : newText;
+        const hash = GLib.compute_checksum_for_string(GLib.ChecksumType.SHA256, clipped, -1);
+        const lines = clipped.split(/\r?\n/);
+        const cls = classifyText(clipped);
+        const entry = this.#entries[idx];
+
+        // Remove any other duplicate that now shares the same content hash
+        for (let i = this.#entries.length - 1; i >= 0; i--) {
+            if (i !== idx && this.#entries[i].type === 'text' && this.#entries[i].hash === hash) {
+                if (this.#entries[i].pinned)
+                    entry.pinned = true;
+                this.#entries.splice(i, 1);
+            }
+        }
+
+        entry.text = clipped;
+        entry.hash = hash;
+        entry.charCount = clipped.length;
+        entry.wordCount = countWords(clipped);
+        entry.lineCount = lines.length;
+        entry.subtype = cls.subtype;
+        entry.colorValue = cls.colorValue;
+        entry.isUrl = cls.isUrl;
+        entry.isJson = cls.isJson;
+        entry.updatedAt = Date.now();
+
+        this.#sortEntries();
+        this.#scheduleSave();
+        this.#emitChanged();
+        return entry;
+    }
+
+    async addImage(glibBytes, mimeType, {sourceApp = null} = {}) {
         if (this.#destroyed || !glibBytes)
             return null;
 
@@ -477,6 +633,8 @@ export class HistoryStore {
         if (existingIdx !== -1) {
             const existing = this.#entries.splice(existingIdx, 1)[0];
             existing.updatedAt = now;
+            if (sourceApp)
+                existing.sourceApp = sourceApp;
             this.#entries.unshift(existing);
             this.#sortEntries();
             this.#scheduleSave();
@@ -527,6 +685,7 @@ export class HistoryStore {
             width,
             height,
             sizeBytes,
+            sourceApp,
             pinned: false,
             updatedAt: now,
         };
@@ -567,6 +726,14 @@ export class HistoryStore {
             return false;
         entry.pinned = !entry.pinned;
         entry.updatedAt = Date.now();
+        if (entry.pinned) {
+            const minOrder = this.#entries
+                .filter(e => e.pinned && e.id !== id && typeof e.pinOrder === 'number')
+                .reduce((min, e) => Math.min(min, e.pinOrder), 0);
+            entry.pinOrder = minOrder - 1;
+        } else {
+            delete entry.pinOrder;
+        }
         this.#sortEntries();
         this.#enforceLimits();
         this.#scheduleSave();
@@ -574,12 +741,34 @@ export class HistoryStore {
         return entry.pinned;
     }
 
+    reorderPinned(sourceId, targetId) {
+        if (!sourceId || !targetId || sourceId === targetId)
+            return false;
+
+        const pinned = this.#entries.filter(e => e.pinned);
+        const srcIdx = pinned.findIndex(e => e.id === sourceId);
+        const dstIdx = pinned.findIndex(e => e.id === targetId);
+        if (srcIdx === -1 || dstIdx === -1)
+            return false;
+
+        const [moved] = pinned.splice(srcIdx, 1);
+        pinned.splice(dstIdx, 0, moved);
+        pinned.forEach((e, i) => {
+            e.pinOrder = i;
+        });
+
+        this.#sortEntries();
+        this.#scheduleSave();
+        this.#emitChanged();
+        return true;
+    }
+
     deleteItem(id) {
         const idx = this.#entries.findIndex(e => e.id === id);
         if (idx === -1)
             return false;
         const [removed] = this.#entries.splice(idx, 1);
-        this.#deleteEntryFilesAsync(removed);
+        this.#stageUndo([removed]);
         this.#scheduleSave();
         this.#emitChanged();
         return true;
@@ -598,14 +787,72 @@ export class HistoryStore {
             return 0;
 
         this.#entries = kept;
-        for (const entry of removed)
-            this.#deleteEntryFilesAsync(entry);
+        this.#stageUndo(removed);
         this.#scheduleSave();
         this.#emitChanged();
         return removed.length;
     }
 
+    undoLastDelete() {
+        if (this.#destroyed || !this.#undoBatch || this.#undoBatch.length === 0)
+            return 0;
+
+        this.#cancelUndoTimer();
+        const toRestore = this.#undoBatch;
+        this.#undoBatch = null;
+
+        let restored = 0;
+        for (const entry of toRestore) {
+            const exists = this.#entries.some(e => e.id === entry.id || (e.type === entry.type && e.hash === entry.hash));
+            if (!exists) {
+                this.#entries.push(entry);
+                restored++;
+            }
+        }
+
+        if (restored > 0) {
+            this.#sortEntries();
+            this.#enforceLimits();
+            this.#scheduleSave();
+            this.#emitChanged();
+        }
+        return restored;
+    }
+
+    #stageUndo(entries) {
+        this.#commitUndoDeletes();
+        this.#undoBatch = entries;
+        this.#undoTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, UNDO_TTL_MS, () => {
+            this.#undoTimerId = 0;
+            this.#commitUndoDeletes();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    #cancelUndoTimer() {
+        if (this.#undoTimerId !== 0) {
+            GLib.Source.remove(this.#undoTimerId);
+            this.#undoTimerId = 0;
+        }
+    }
+
+    #commitUndoDeletes() {
+        this.#cancelUndoTimer();
+        if (!this.#undoBatch)
+            return;
+        const stale = this.#undoBatch;
+        this.#undoBatch = null;
+        for (const entry of stale) {
+            // Only remove image files if no current entry still references the same hash
+            const stillReferenced = entry.type === 'image' &&
+                this.#entries.some(e => e.type === 'image' && e.hash === entry.hash);
+            if (!stillReferenced)
+                this.#deleteEntryFilesAsync(entry);
+        }
+    }
+
     async wipeAll() {
+        this.#commitUndoDeletes();
         const removed = this.#entries;
         this.#entries = [];
         this.#pendingPayload = null;
@@ -618,16 +865,38 @@ export class HistoryStore {
         await this.pruneOrphanFiles();
     }
 
-    filter(query) {
+    filter(query, category = 'all') {
+        const cat = (category ?? 'all').toLowerCase();
+        const matchesCategory = entry => {
+            switch (cat) {
+            case 'pinned':
+                return Boolean(entry.pinned);
+            case 'text':
+                return entry.type === 'text';
+            case 'image':
+                return entry.type === 'image';
+            case 'url':
+                return entry.type === 'text' && (entry.subtype === 'url' || entry.isUrl);
+            case 'code':
+                return entry.type === 'text' && entry.subtype === 'code';
+            case 'color':
+                return entry.type === 'text' && entry.subtype === 'color';
+            default:
+                return true;
+            }
+        };
+
+        const pool = cat === 'all' ? this.#entries : this.#entries.filter(matchesCategory);
         const q = (query ?? '').trim().toLowerCase();
         if (!q)
-            return [...this.#entries];
+            return [...pool];
 
         const scored = [];
-        for (const entry of this.#entries) {
+        for (const entry of pool) {
+            const appTag = entry.sourceApp ? ` ${entry.sourceApp}` : '';
             const hay = entry.type === 'text'
-                ? entry.text.toLowerCase()
-                : `${entry.mimeType} image ${entry.width || ''}x${entry.height || ''} ${formatBytes(entry.sizeBytes)}`.toLowerCase();
+                ? `${entry.text}${appTag} ${entry.subtype ?? ''}`.toLowerCase()
+                : `${entry.mimeType} image ${entry.width || ''}x${entry.height || ''} ${formatBytes(entry.sizeBytes)}${appTag}`.toLowerCase();
             const score = scoreMatch(hay, q);
             if (score > 0)
                 scored.push({entry, score});
@@ -689,6 +958,12 @@ export class HistoryStore {
         this.#entries.sort((a, b) => {
             if (a.pinned !== b.pinned)
                 return a.pinned ? -1 : 1;
+            if (a.pinned && b.pinned) {
+                const ao = typeof a.pinOrder === 'number' ? a.pinOrder : Number.MAX_SAFE_INTEGER;
+                const bo = typeof b.pinOrder === 'number' ? b.pinOrder : Number.MAX_SAFE_INTEGER;
+                if (ao !== bo)
+                    return ao - bo;
+            }
             return b.updatedAt - a.updatedAt;
         });
     }
@@ -794,6 +1069,7 @@ export class HistoryStore {
 
     destroy() {
         this.#destroyed = true;
+        this.#commitUndoDeletes();
         this.#cancellable.cancel();
         this.#pendingPayload = null;
         this.#onChanged = null;

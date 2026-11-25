@@ -2,7 +2,7 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import GdkPixbuf from 'gi://GdkPixbuf';
 
-import {HistoryStore, scoreMatch} from '../historyStore.js';
+import {HistoryStore, classifyText, scoreMatch} from '../historyStore.js';
 
 function assert(cond, msg) {
     if (!cond)
@@ -94,9 +94,58 @@ async function runTests() {
     const filtered = store.filter('eps');
     assert(filtered.length >= 1 && filtered[0].text === 'epsilon item', 'exact substring match ranks first even over pinned fuzzy match');
 
-    // Clear unpinned preserves pinned
-    store.clearUnpinned();
+    // Classification checks
+    assert(classifyText('#3584e4').subtype === 'color', 'detects hex color');
+    assert(classifyText('rgb(53, 132, 228)').subtype === 'color', 'detects rgb color');
+    assert(classifyText('https://github.com/nilaymallikk').subtype === 'url', 'detects URL');
+    assert(classifyText('dev@example.com').subtype === 'email', 'detects email');
+    const jsonCls = classifyText('{"name":"smart-clipboard","v":2}');
+    assert(jsonCls.subtype === 'code' && jsonCls.isJson === true, 'detects JSON as code');
+    assert(classifyText('const fn = (x) => x * 2;').subtype === 'code', 'detects JS code');
+    assert(classifyText('just a normal note').subtype === 'text', 'detects plain text');
+
+    // Source app + category filtering + inline edit + pin reorder + undo
+    const colorEntry = await store.addText('#ff5500', {sourceApp: 'Figma'});
+    const urlEntry = await store.addText('https://gnome.org', {sourceApp: 'Firefox'});
+    const codeEntry = await store.addText('{"ok": true}', {sourceApp: 'VS Code'});
+    assert(colorEntry.subtype === 'color' && colorEntry.sourceApp === 'Figma', 'stores subtype & sourceApp');
+    assert(store.filter('', 'color').some(e => e.id === colorEntry.id), 'color category filter works');
+    assert(store.filter('', 'url').some(e => e.id === urlEntry.id), 'url category filter works');
+    assert(store.filter('', 'code').some(e => e.id === codeEntry.id), 'code category filter works');
+    assert(store.filter('firefox').some(e => e.id === urlEntry.id), 'search matches sourceApp');
+
+    // Pin multiple items and reorder them
+    store.togglePin(colorEntry.id);
+    store.togglePin(urlEntry.id);
+    assert(store.entries[0].id === urlEntry.id, 'newly pinned goes to top');
+    assert(store.reorderPinned(colorEntry.id, urlEntry.id), 'reorderPinned succeeds');
+    assert(store.entries[0].id === colorEntry.id && store.entries[1].id === urlEntry.id, 'pinned order updated');
+
+    // Inline text edit updates hash, metadata, classification
+    const edited = store.updateText(codeEntry.id, 'https://edited.example.com');
+    assert(edited && edited.subtype === 'url' && edited.isUrl, 'updateText reclassifies edited text');
+
+    // Delete & Undo restores item (including images!)
+    const undoImg = await store.addImage(makeTestPngBytes(50, 50), 'image/png', {sourceApp: 'Screenshot'});
+    const serializable = store.getSerializableEntries();
+    const serImg = serializable.find(e => e.id === undoImg.id);
+    assert(serImg && serImg.imagePath && serImg.thumbPath, 'getSerializableEntries resolves paths');
+    assert(store.deleteItem(undoImg.id), 'deleteItem removes image');
+    assert(!store.getEntry(undoImg.id), 'image removed from entries');
+    assert(store.canUndo, 'canUndo is true after delete');
+    assert(store.undoLastDelete() === 1, 'undoLastDelete restores 1 item');
+    assert(Boolean(store.getEntry(undoImg.id)), 'restored image back in store');
+    assert(store.getImageFile(undoImg).query_exists(null), 'restored image file preserved on disk');
+
+    // Clear unpinned preserves pinned & can be undone
+    store.togglePin(colorEntry.id); // unpin colorEntry
+    store.togglePin(urlEntry.id);   // unpin urlEntry
+    const clearedCount = store.clearUnpinned();
+    assert(clearedCount >= 1, 'clearUnpinned removes unpinned items');
     assert(store.entries.length === 1 && store.entries[0].id === b.id, 'clearUnpinned keeps only pinned');
+    assert(store.undoLastDelete() === clearedCount, 'undo restores cleared unpinned items');
+    store.clearUnpinned();
+    assert(store.entries.length === 1 && store.entries[0].id === b.id, 'clearUnpinned again leaves only pinned');
 
     // Wait briefly for coalesced async JSON save
     await new Promise(r => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 80, () => (r(), GLib.SOURCE_REMOVE)));
