@@ -1,0 +1,10 @@
+{
+  "uuid": "smart-clipboard@nilaymallik.local",
+  "name": "Smart Clipboard",
+  "description": "Fast, lightweight, keyboard-first clipboard manager for text and images",
+  "shell-version": [
+    "51"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.smart-clipboard",
+  "version-name": "1.0.0"
+}

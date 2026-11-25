@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.smart-clipboard"
+          path="/org/gnome/shell/extensions/smart-clipboard/">
+
+    <key name="max-text-history" type="i">
+      <default>50</default>
+      <range min="5" max="500"/>
+      <summary>Maximum text history entries</summary>
+      <description>Maximum number of unpinned text entries retained in history.</description>
+    </key>
+
+    <key name="max-image-history" type="i">
+      <default>20</default>
+      <range min="1" max="200"/>
+      <summary>Maximum image history entries</summary>
+      <description>Maximum number of unpinned image entries retained in history.</description>
+    </key>
+
+    <key name="max-image-size-mb" type="i">
+      <default>10</default>
+      <range min="1" max="100"/>
+      <summary>Maximum single image size (MB)</summary>
+      <description>Images larger than this size in megabytes are skipped.</description>
+    </key>
+
+    <key name="toggle-shortcut" type="as">
+      <default>['&lt;Super&gt;v']</default>
+      <summary>Shortcut to toggle Smart Clipboard popup</summary>
+      <description>Global keybinding to open or close the Smart Clipboard menu.</description>
+    </key>
+
+    <key name="capture-images" type="b">
+      <default>true</default>
+      <summary>Capture images</summary>
+      <description>Whether to capture image data copied to the clipboard.</description>
+    </key>
+
+    <key name="persist-history" type="b">
+      <default>true</default>
+      <summary>Persist history across sessions</summary>
+      <description>Save clipboard history to disk and restore it on startup.</description>
+    </key>
+
+    <key name="private-mode" type="b">
+      <default>false</default>
+      <summary>Pause / Private Mode</summary>
+      <description>Temporarily stop recording clipboard updates when enabled.</description>
+    </key>
+
+    <key name="wipe-nonce" type="x">
+      <default>0</default>
+      <summary>Wipe trigger nonce</summary>
+      <description>Internal timestamp incremented by preferences to trigger a full cache and history wipe.</description>
+    </key>
+
+  </schema>
+</schemalist>
