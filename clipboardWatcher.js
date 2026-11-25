@@ -75,6 +75,17 @@ export class ClipboardWatcher {
             this.#maxImageSizeMb = maxImageSizeMb;
     }
 
+    copyPlainText(text) {
+        if (this.#destroyed || typeof text !== 'string' || !this.#clipboard)
+            return false;
+
+        this.#cancelDebounce();
+        this.#suppressHash = GLib.compute_checksum_for_string(GLib.ChecksumType.SHA256, text, -1);
+        this.#suppressUntilUs = GLib.get_monotonic_time() + SELF_COPY_SUPPRESS_US;
+        this.#clipboard.set_text(CLIPBOARD_TYPE, text);
+        return true;
+    }
+
     async copyEntryToClipboard(entry, store) {
         if (this.#destroyed || !entry || !this.#clipboard)
             return false;
