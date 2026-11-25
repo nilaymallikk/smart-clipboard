@@ -1,6 +1,7 @@
 #!/usr/bin/env gjs -m
 import Adw from 'gi://Adw?version=1';
 import Gdk from 'gi://Gdk?version=4.0';
+import GdkPixbuf from 'gi://GdkPixbuf';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk?version=4.0';
@@ -24,8 +25,14 @@ import {
 } from './popupClient.js';
 
 const STRIP_COUNT = 3;
+const TILE_W = 182;
+const TILE_H = 104;
+const THUMB_W = 54;
+const THUMB_H = 34;
+const MAX_THUMB_CACHE = 36;
 const DECODER = new TextDecoder('utf-8');
 const MODULE_DIR = Gio.File.new_for_uri(import.meta.url).get_parent().get_path();
+const START_HIDDEN = GLib.getenv('SMART_CLIPBOARD_START_HIDDEN') === '1';
 
 function formatShortcutBadge(accel) {
     if (!accel || typeof accel !== 'string')
@@ -50,6 +57,26 @@ function formatShortcutBadge(accel) {
     return parts.length > 0 ? parts.join(' + ') : 'Super + V';
 }
 
+function clampBox(child, width, height, cssClasses = []) {
+    return new Gtk.ScrolledWindow({
+        hscrollbar_policy: Gtk.PolicyType.NEVER,
+        vscrollbar_policy: Gtk.PolicyType.NEVER,
+        propagate_natural_width: false,
+        propagate_natural_height: false,
+        kinetic_scrolling: false,
+        can_focus: false,
+        min_content_width: width,
+        min_content_height: height,
+        max_content_width: width,
+        max_content_height: height,
+        width_request: width,
+        height_request: height,
+        overflow: Gtk.Overflow.HIDDEN,
+        css_classes: cssClasses,
+        child,
+    });
+}
+
 class SmartClipboardPopupApp {
     #app;
     #window = null;
@@ -71,13 +98,16 @@ class SmartClipboardPopupApp {
     #entries = [];
     #visibleEntries = [];
     #tileWidgets = [];
+    #thumbCache = new Map();
     #selectedStripIdx = 0;
     #textOnly = false;
     #expanded = false;
     #paused = false;
+    #hasLoadedOnce = false;
     #isDragging = false;
     #inModal = false;
     #syncingToggles = false;
+    #suppressFirstActivate = START_HIDDEN;
     #hideTimerId = 0;
 
     constructor() {
@@ -86,7 +116,13 @@ class SmartClipboardPopupApp {
             flags: Gio.ApplicationFlags.DEFAULT_FLAGS,
         });
         this.#app.connect('startup', () => this.#onStartup());
-        this.#app.connect('activate', () => this.#showWindow());
+        this.#app.connect('activate', () => {
+            if (this.#suppressFirstActivate) {
+                this.#suppressFirstActivate = false;
+                return;
+            }
+            this.#showWindow();
+        });
         this.#app.connect('shutdown', () => this.#onShutdown());
     }
 
@@ -110,6 +146,9 @@ class SmartClipboardPopupApp {
             Quit: () => this.#quitApp(),
         });
         this.#dbusExport.export(Gio.DBus.session, POPUP_OBJECT_PATH);
+
+        // Pre-load entries & pre-render tiles while hidden so first Super+V is instant (<10ms)
+        this.#refreshFromExtension();
     }
 
     #loadCss() {
@@ -123,6 +162,35 @@ class SmartClipboardPopupApp {
             provider,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         );
+    }
+
+    #getScaledTexture(path) {
+        if (!path)
+            return null;
+        if (this.#thumbCache.has(path))
+            return this.#thumbCache.get(path);
+
+        let texture = null;
+        try {
+            // Decode at 2x tile resolution so big 4K images never stall GPU upload or layout
+            const pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, TILE_W * 2, TILE_H * 2, true);
+            texture = Gdk.Texture.new_for_pixbuf(pb);
+        } catch {
+            try {
+                texture = Gdk.Texture.new_from_filename(path);
+            } catch {
+                texture = null;
+            }
+        }
+
+        if (texture) {
+            if (this.#thumbCache.size >= MAX_THUMB_CACHE) {
+                const oldestKey = this.#thumbCache.keys().next().value;
+                this.#thumbCache.delete(oldestKey);
+            }
+            this.#thumbCache.set(path, texture);
+        }
+        return texture;
     }
 
     #buildWindow() {
@@ -190,13 +258,13 @@ class SmartClipboardPopupApp {
     #buildTopBar() {
         const bar = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 8,
+            spacing: 7,
             css_classes: ['sc-topbar'],
         });
 
         bar.append(new Gtk.Image({
             icon_name: 'edit-paste-symbolic',
-            pixel_size: 16,
+            pixel_size: 14,
             css_classes: ['sc-brand-icon'],
         }));
         bar.append(new Gtk.Label({
@@ -232,12 +300,12 @@ class SmartClipboardPopupApp {
     #buildPreviewStrip() {
         const strip = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 10,
+            spacing: 8,
         });
 
         this.#stripTilesBox = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 10,
+            spacing: 8,
             homogeneous: true,
         });
         strip.append(this.#stripTilesBox);
@@ -247,7 +315,6 @@ class SmartClipboardPopupApp {
             vexpand: true,
         }));
 
-        // Right-side [T] Text filter tile (matching screenshot)
         this.#textFilterBtn = new Gtk.ToggleButton({
             css_classes: ['sc-text-filter-tile'],
             tooltip_text: 'Filter text snippets only',
@@ -256,7 +323,7 @@ class SmartClipboardPopupApp {
             orientation: Gtk.Orientation.VERTICAL,
             halign: Gtk.Align.CENTER,
             valign: Gtk.Align.CENTER,
-            spacing: 4,
+            spacing: 3,
         });
         const glyphBox = new Gtk.Box({
             halign: Gtk.Align.CENTER,
@@ -345,7 +412,7 @@ class SmartClipboardPopupApp {
         const scroller = new Gtk.ScrolledWindow({
             hscrollbar_policy: Gtk.PolicyType.NEVER,
             vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
-            height_request: 260,
+            height_request: 230,
             vexpand: true,
         });
 
@@ -365,7 +432,10 @@ class SmartClipboardPopupApp {
     }
 
     #setExpanded(expanded) {
-        this.#expanded = Boolean(expanded);
+        const next = Boolean(expanded);
+        if (this.#expanded === next)
+            return;
+        this.#expanded = next;
         this.#drawerBox.set_visible(this.#expanded);
         this.#expandBtn.set_icon_name(this.#expanded ? 'go-down-symbolic' : 'go-next-symbolic');
         this.#expandBtn.set_tooltip_text(this.#expanded ? 'Collapse to 3-preview bar' : 'Expand full history & search');
@@ -380,6 +450,7 @@ class SmartClipboardPopupApp {
             const state = await this.#client.getState();
             this.#entries = Array.isArray(state.entries) ? state.entries : [];
             this.#paused = Boolean(state.paused);
+            this.#hasLoadedOnce = true;
             if (state.shortcut)
                 this.#shortcutLabel.set_label(formatShortcutBadge(state.shortcut));
 
@@ -426,27 +497,19 @@ class SmartClipboardPopupApp {
     }
 
     #createEmptyTile(index) {
-        const box = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            halign: Gtk.Align.FILL,
-            valign: Gtk.Align.FILL,
-            css_classes: ['sc-tile-empty'],
-        });
-        box.append(new Gtk.Label({
+        const label = new Gtk.Label({
             label: index === 0 ? 'Copy anything to start' : 'Empty slot',
             hexpand: true,
             vexpand: true,
             halign: Gtk.Align.CENTER,
             valign: Gtk.Align.CENTER,
             css_classes: ['sc-tile-empty-label'],
-        }));
-        return box;
+        });
+        return clampBox(label, TILE_W, TILE_H, ['sc-tile-empty']);
     }
 
     #createPreviewTile(entry, index) {
         const overlay = new Gtk.Overlay({
-            width_request: 206,
-            height_request: 122,
             overflow: Gtk.Overflow.HIDDEN,
             css_classes: index === this.#selectedStripIdx
                 ? ['sc-tile', 'sc-tile-selected']
@@ -454,7 +517,7 @@ class SmartClipboardPopupApp {
         });
         overlay._scEntry = entry;
 
-        // Visual preview surface (renders real images for both image entries and local image paths)
+        let inner;
         const resolvedImg = resolveEntryImage(entry);
         if (resolvedImg) {
             const pic = new Gtk.Picture({
@@ -463,16 +526,18 @@ class SmartClipboardPopupApp {
                 hexpand: true,
                 vexpand: true,
             });
-            pic.set_file(resolvedImg.file);
-            overlay.set_child(pic);
+            const tex = this.#getScaledTexture(resolvedImg.thumbPath || resolvedImg.path);
+            if (tex)
+                pic.set_paintable(tex);
+            else
+                pic.set_file(resolvedImg.file);
+            inner = pic;
         } else if (entry.subtype === 'color') {
             const parsed = parseCssColor(entry.colorValue || entry.text);
             const colorBox = new Gtk.Box({
                 orientation: Gtk.Orientation.VERTICAL,
                 hexpand: true,
                 vexpand: true,
-                halign: Gtk.Align.FILL,
-                valign: Gtk.Align.FILL,
                 css_classes: ['sc-tile-color-bg'],
             });
             if (parsed && /^[#a-zA-Z0-9(),.%\s/+-]+$/.test(parsed.css)) {
@@ -488,7 +553,7 @@ class SmartClipboardPopupApp {
                 vexpand: true,
                 css_classes: ['sc-tile-color-pill', 'monospace'],
             }));
-            overlay.set_child(colorBox);
+            inner = colorBox;
         } else {
             const textBox = new Gtk.Box({
                 orientation: Gtk.Orientation.VERTICAL,
@@ -505,7 +570,7 @@ class SmartClipboardPopupApp {
                 }));
             }
             textBox.append(new Gtk.Label({
-                label: formatTextPreview(entry.text, entry.sourceApp ? 4 : 5, 190),
+                label: formatTextPreview(entry.text, entry.sourceApp ? 4 : 5, 160),
                 xalign: 0,
                 yalign: 0,
                 lines: entry.sourceApp ? 4 : 5,
@@ -518,22 +583,22 @@ class SmartClipboardPopupApp {
                     ? ['sc-tile-text', 'monospace']
                     : ['sc-tile-text'],
             }));
-            overlay.set_child(textBox);
+            inner = textBox;
         }
 
-        // Subtle pin indicator in top-left when pinned
+        // Hard-lock every tile to exact TILE_W x TILE_H regardless of source image/text size
+        overlay.set_child(clampBox(inner, TILE_W, TILE_H));
+
         if (entry.pinned) {
-            const pinBadge = new Gtk.Image({
+            overlay.add_overlay(new Gtk.Image({
                 icon_name: 'view-pin-symbolic',
-                pixel_size: 12,
+                pixel_size: 11,
                 halign: Gtk.Align.START,
                 valign: Gtk.Align.START,
                 css_classes: ['sc-tile-pin-dot'],
-            });
-            overlay.add_overlay(pinBadge);
+            }));
         }
 
-        // Clean hover-only mini action pill (Copy, Pin, Preview, Delete)
         const hoverActions = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
             spacing: 2,
@@ -561,7 +626,6 @@ class SmartClipboardPopupApp {
 
         overlay.add_overlay(hoverActions);
 
-        // Reveal action buttons & update active orange highlight on hover
         const motion = new Gtk.EventControllerMotion();
         motion.connect('enter', () => {
             hoverActions.set_visible(true);
@@ -572,7 +636,6 @@ class SmartClipboardPopupApp {
         });
         overlay.add_controller(motion);
 
-        // Single-click anywhere on the tile body (not the hover buttons) -> one-click copy & paste!
         const click = new Gtk.GestureClick({button: Gdk.BUTTON_PRIMARY});
         click.connect('released', (_g, _nPress, x, y) => {
             const picked = overlay.pick(x, y, Gtk.PickFlags.DEFAULT);
@@ -582,7 +645,6 @@ class SmartClipboardPopupApp {
         });
         overlay.add_controller(click);
 
-        // Real Wayland drag-and-drop right from any preview tile!
         this.#attachDragAndDrop(overlay, entry, 'sc-tile-drop-target');
         return overlay;
     }
@@ -633,14 +695,15 @@ class SmartClipboardPopupApp {
             const pic = new Gtk.Picture({
                 content_fit: Gtk.ContentFit.COVER,
                 can_shrink: true,
-                width_request: 56,
-                height_request: 36,
-                css_classes: ['sc-drawer-thumb'],
-                overflow: Gtk.Overflow.HIDDEN,
+                hexpand: true,
+                vexpand: true,
             });
-            const thumbFile = Gio.File.new_for_path(resolvedImg.thumbPath);
-            pic.set_file(thumbFile.query_exists(null) ? thumbFile : resolvedImg.file);
-            hbox.append(pic);
+            const tex = this.#getScaledTexture(resolvedImg.thumbPath || resolvedImg.path);
+            if (tex)
+                pic.set_paintable(tex);
+            else
+                pic.set_file(resolvedImg.file);
+            hbox.append(clampBox(pic, THUMB_W, THUMB_H, ['sc-drawer-thumb']));
         } else if (entry.subtype === 'color') {
             const parsed = parseCssColor(entry.colorValue || entry.text);
             const dot = new Gtk.Box({valign: Gtk.Align.CENTER, css_classes: ['sc-color-dot']});
@@ -654,7 +717,7 @@ class SmartClipboardPopupApp {
 
         const col = new Gtk.Box({
             orientation: Gtk.Orientation.VERTICAL,
-            spacing: 2,
+            spacing: 1,
             hexpand: true,
             valign: Gtk.Align.CENTER,
         });
@@ -663,7 +726,7 @@ class SmartClipboardPopupApp {
                 ? (entry.type === 'image'
                     ? `Image${entry.width && entry.height ? ` ${entry.width}×${entry.height}` : ''}`
                     : resolvedImg.file.get_basename())
-                : formatTextPreview(entry.text, 1, 95, ' '),
+                : formatTextPreview(entry.text, 1, 80, ' '),
             xalign: 0,
             ellipsize: Pango.EllipsizeMode.END,
         }));
@@ -718,11 +781,10 @@ class SmartClipboardPopupApp {
             this.#cancelFocusAutoHide();
             const resolvedImg = resolveEntryImage(entry);
             if (resolvedImg) {
-                try {
-                    src.set_icon(Gdk.Texture.new_from_filename(resolvedImg.thumbPath), 12, 12);
+                const tex = this.#getScaledTexture(resolvedImg.thumbPath || resolvedImg.path);
+                if (tex) {
+                    src.set_icon(tex, 12, 12);
                     return;
-                } catch {
-                    // fallback to label
                 }
             }
             const icon = Gtk.DragIcon.get_for_drag(drag);
@@ -785,8 +847,8 @@ class SmartClipboardPopupApp {
                     ? `Image (${entry.width}×${entry.height})`
                     : resolvedImg.file.get_basename())
                 : 'Preview',
-            content_width: 580,
-            content_height: 440,
+            content_width: 560,
+            content_height: 420,
         });
 
         const view = new Adw.ToolbarView();
@@ -801,7 +863,6 @@ class SmartClipboardPopupApp {
         });
 
         if (resolvedImg) {
-            const stage = new Gtk.Box({css_classes: ['sc-dialog-image'], hexpand: true, vexpand: true});
             const pic = new Gtk.Picture({
                 content_fit: Gtk.ContentFit.CONTAIN,
                 can_shrink: true,
@@ -809,8 +870,7 @@ class SmartClipboardPopupApp {
                 vexpand: true,
             });
             pic.set_file(resolvedImg.file);
-            stage.append(pic);
-            body.append(stage);
+            body.append(clampBox(pic, 520, 320, ['sc-dialog-image']));
         } else {
             const scroller = new Gtk.ScrolledWindow({hexpand: true, vexpand: true, css_classes: ['sc-dialog-text']});
             const buffer = new Gtk.TextBuffer();
@@ -1043,11 +1103,21 @@ class SmartClipboardPopupApp {
         if (!this.#window)
             return;
         this.#cancelFocusAutoHide();
-        this.#selectedStripIdx = 0;
-        this.#setExpanded(false);
-        this.#searchEntry.set_text('');
-        this.#refreshFromExtension();
+
+        // Reset selection highlight without rebuilding tiles — open is 0ms on the hot path
+        if (this.#selectedStripIdx !== 0)
+            this.#selectStripIndex(0);
+        if (this.#expanded)
+            this.#setExpanded(false);
+        if (this.#searchEntry.get_text().length > 0)
+            this.#searchEntry.set_text('');
+
+        // Present immediately using already-warm tiles
         this.#window.present();
+
+        // Only fetch over D-Bus if startup fetch hasn't completed yet (live changes arrive via Changed signal)
+        if (!this.#hasLoadedOnce)
+            this.#refreshFromExtension();
     }
 
     #hideWindow() {
@@ -1063,6 +1133,7 @@ class SmartClipboardPopupApp {
 
     #onShutdown() {
         this.#cancelFocusAutoHide();
+        this.#thumbCache.clear();
         if (this.#dbusExport) {
             try {
                 this.#dbusExport.unexport();

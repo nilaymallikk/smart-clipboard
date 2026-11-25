@@ -28,8 +28,10 @@ export default class SmartClipboardExtension extends Extension {
         this._settings = this.getSettings();
         this._settingsChangedId = 0;
         this._windowCreatedId = 0;
+        this._windowMapId = 0;
         this._pasteTimeoutId = 0;
-        this._activateTimeoutId = 0;
+        this._prewarmTimeoutId = 0;
+        this._retryShowTimeoutId = 0;
         this._popupProc = null;
         this._popupWin = null;
         this._popupSizeId = 0;
@@ -109,13 +111,25 @@ export default class SmartClipboardExtension extends Extension {
             this._preparePopupWindow(win);
         });
 
+        this._windowMapId = global.window_manager.connect('map', (_wm, actor) => {
+            const win = actor?.meta_window;
+            if (!win || win.get_gtk_application_id?.() !== POPUP_APP_ID)
+                return;
+            this._positionPopupWindow(win);
+            this._animatePopupIn(actor);
+        });
+
         this._settingsChangedId = this._settings.connect('changed', (_settings, key) => {
             this._onSettingChanged(key);
         });
 
-        this._store.load().catch(e => {
-            console.warn(`[smart-clipboard] Initial store load failed: ${e.message}`);
-        });
+        this._store.load()
+            .catch(e => {
+                console.warn(`[smart-clipboard] Initial store load failed: ${e.message}`);
+            })
+            .finally(() => {
+                this._schedulePrewarm();
+            });
     }
 
     _claimToggleShortcut() {
@@ -216,6 +230,34 @@ export default class SmartClipboardExtension extends Extension {
         }
     }
 
+    _animatePopupIn(actor) {
+        try {
+            actor.remove_all_transitions();
+            actor.opacity = 0;
+            actor.translation_y = -8;
+            actor.ease({
+                opacity: 255,
+                translation_y: 0,
+                duration: 115,
+                mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+            });
+        } catch {
+            actor.opacity = 255;
+            actor.translation_y = 0;
+        }
+    }
+
+    _schedulePrewarm() {
+        if (this._prewarmTimeoutId !== 0)
+            return;
+        this._prewarmTimeoutId = GLib.timeout_add(GLib.PRIORITY_LOW, 350, () => {
+            this._prewarmTimeoutId = 0;
+            if (!this._popupProc)
+                this._spawnPopupProcess({hidden: true});
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _togglePopup() {
         const focused = global.display.focus_window;
         if (focused && focused.get_gtk_application_id?.() !== POPUP_APP_ID)
@@ -229,43 +271,58 @@ export default class SmartClipboardExtension extends Extension {
             null,
             null,
             Gio.DBusCallFlags.NO_AUTO_START,
-            1000,
+            600,
             null,
             (conn, res) => {
                 try {
                     conn.call_finish(res);
-                    this._scheduleActivatePopup();
+                    const win = this._findPopupWindow();
+                    if (win && !win.minimized)
+                        this._preparePopupWindow(win);
                 } catch {
-                    this._spawnPopupProcess();
+                    if (this._popupProc) {
+                        this._scheduleRetryShow();
+                    } else {
+                        this._spawnPopupProcess({hidden: false});
+                    }
                 }
             }
         );
     }
 
-    _scheduleActivatePopup() {
-        if (this._activateTimeoutId !== 0) {
-            GLib.Source.remove(this._activateTimeoutId);
-            this._activateTimeoutId = 0;
+    _scheduleRetryShow() {
+        if (this._retryShowTimeoutId !== 0) {
+            GLib.Source.remove(this._retryShowTimeoutId);
+            this._retryShowTimeoutId = 0;
         }
-        this._activateTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 35, () => {
-            this._activateTimeoutId = 0;
-            const win = this._findPopupWindow();
-            if (win && !win.minimized)
-                this._preparePopupWindow(win);
+        this._retryShowTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 140, () => {
+            this._retryShowTimeoutId = 0;
+            Gio.DBus.session.call(
+                POPUP_APP_ID,
+                POPUP_OBJECT_PATH,
+                POPUP_IFACE_NAME,
+                'Show',
+                null,
+                null,
+                Gio.DBusCallFlags.NO_AUTO_START,
+                600,
+                null,
+                null
+            );
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _spawnPopupProcess() {
+    _spawnPopupProcess({hidden = false} = {}) {
         if (this._popupProc)
             return;
 
         const scriptPath = GLib.build_filenamev([this.path, 'popupApp.js']);
         try {
-            const proc = Gio.Subprocess.new(
-                ['gjs', '-m', scriptPath],
-                Gio.SubprocessFlags.NONE
-            );
+            const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
+            if (hidden)
+                launcher.setenv('SMART_CLIPBOARD_START_HIDDEN', '1', true);
+            const proc = launcher.spawnv(['gjs', '-m', scriptPath]);
             this._popupProc = proc;
             proc.wait_async(null, (p, res) => {
                 try {
@@ -436,13 +493,21 @@ export default class SmartClipboardExtension extends Extension {
             GLib.Source.remove(this._pasteTimeoutId);
             this._pasteTimeoutId = 0;
         }
-        if (this._activateTimeoutId !== 0) {
-            GLib.Source.remove(this._activateTimeoutId);
-            this._activateTimeoutId = 0;
+        if (this._prewarmTimeoutId !== 0) {
+            GLib.Source.remove(this._prewarmTimeoutId);
+            this._prewarmTimeoutId = 0;
+        }
+        if (this._retryShowTimeoutId !== 0) {
+            GLib.Source.remove(this._retryShowTimeoutId);
+            this._retryShowTimeoutId = 0;
         }
         if (this._windowCreatedId !== 0) {
             global.display.disconnect(this._windowCreatedId);
             this._windowCreatedId = 0;
+        }
+        if (this._windowMapId !== 0) {
+            global.window_manager.disconnect(this._windowMapId);
+            this._windowMapId = 0;
         }
         if (this._settings && this._settingsChangedId !== 0) {
             this._settings.disconnect(this._settingsChangedId);

@@ -360,7 +360,16 @@ export class ClipboardWatcher {
                 return;
             }
             this.#clipboard.get_content(CLIPBOARD_TYPE, mimeType, (_clipboard, bytes) => {
-                resolve(bytes ?? null);
+                // `bytes` is transfer-none: St frees it as soon as this callback
+                // returns, so it must be copied here and never carried over an await.
+                // Keeping the GBytes and calling get_size()/get_data() after the
+                // await reads freed memory and aborts gnome-shell (heap corruption).
+                if (!bytes || bytes.get_size() === 0) {
+                    resolve(null);
+                    return;
+                }
+                const view = bytes.get_data();
+                resolve(view ? new GLib.Bytes(new Uint8Array(view)) : null);
             });
         });
     }
