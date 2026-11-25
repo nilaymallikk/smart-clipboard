@@ -250,6 +250,20 @@ export default class SmartClipboardPreferences extends ExtensionPreferences {
         settings.bind('private-mode', privateRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         behaviorGroup.add(privateRow);
 
+        const autoPasteRow = new Adw.SwitchRow({
+            title: 'Auto-paste on Enter or double-click',
+            subtitle: 'Paste directly into the previous window (uses Ctrl+Shift+V in terminals)',
+        });
+        settings.bind('auto-paste', autoPasteRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        behaviorGroup.add(autoPasteRow);
+
+        const previewPaneRow = new Adw.SwitchRow({
+            title: 'Show live preview pane',
+            subtitle: 'Display full text, images, color swatches, and quick transforms beside the list',
+        });
+        settings.bind('show-preview-pane', previewPaneRow, 'active', Gio.SettingsBindFlags.DEFAULT);
+        behaviorGroup.add(previewPaneRow);
+
         // --- Keyboard Shortcut ---
         const shortcutGroup = new Adw.PreferencesGroup({
             title: 'Keyboard Shortcut',

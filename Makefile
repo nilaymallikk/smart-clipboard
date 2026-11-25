@@ -1,7 +1,7 @@
 UUID := smart-clipboard@nilaymallik.local
 EXT_DIR := $(HOME)/.local/share/gnome-shell/extensions/$(UUID)
 SCHEMA_DIR := schemas
-JS_FILES := extension.js prefs.js clipboardWatcher.js historyStore.js popupUi.js
+JS_FILES := extension.js prefs.js clipboardWatcher.js historyStore.js dbusService.js popupUi.js popupClient.js popupPreview.js popupApp.js
 
 .PHONY: all compile-schemas install uninstall check test-headless
 
@@ -24,7 +24,8 @@ check: compile-schemas
 		node --check "$$f" || exit 1; \
 	done
 	gjs -m tests/store.test.mjs
-	@echo "Syntax, schema, and store checks passed."
+	gjs -m tests/client.test.mjs
+	@echo "Syntax, schema, store, and client checks passed."
 
 test-headless: install
 	@echo "Running isolated headless GNOME Shell 51 enable/disable/re-enable test..."
