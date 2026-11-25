@@ -99,6 +99,7 @@ const ALWAYS_SENSITIVE_PREFIXES = [
 export class ClipboardWatcher {
     #selection = null;
     #clipboard = null;
+    #cancellable = null;
     #ownerChangedId = 0;
     #debounceId = 0;
     #captureSeq = 0;
@@ -121,6 +122,7 @@ export class ClipboardWatcher {
 
         this.#clipboard = St.Clipboard.get_default();
         this.#selection = global.display.get_selection();
+        this.#cancellable = new Gio.Cancellable();
         this.#ownerChangedId = this.#selection.connect(
             'owner-changed',
             (_selection, selectionType, _selectionSource) => {
@@ -237,12 +239,12 @@ export class ClipboardWatcher {
 
         // 1. Prefer raw image clipboard data first so copied images don't get captured as filenames/URLs
         if (this.#captureImages && imageMime) {
-            const bytes = await this.#getContentAsync(imageMime);
+            const maxBytes = this.#maxImageSizeMb * 1024 * 1024;
+            const bytes = await this.#getContentAsync(imageMime, maxBytes + 1);
             if (this.#destroyed || this.#paused || seq !== this.#captureSeq)
                 return;
             if (bytes) {
                 const sizeBytes = bytes.get_size();
-                const maxBytes = this.#maxImageSizeMb * 1024 * 1024;
                 if (sizeBytes > 0 && sizeBytes <= maxBytes) {
                     const hash = GLib.compute_checksum_for_bytes(GLib.ChecksumType.SHA256, bytes);
                     if (!this.#isSuppressed(hash))
@@ -254,7 +256,7 @@ export class ClipboardWatcher {
 
         // 2. Copied image files from file managers (text/uri-list or x-special/gnome-copied-files)
         if (this.#captureImages && uriMime) {
-            const uriBytes = await this.#getContentAsync(uriMime);
+            const uriBytes = await this.#getContentAsync(uriMime, 64 * 1024);
             if (this.#destroyed || this.#paused || seq !== this.#captureSeq)
                 return;
             if (uriBytes && uriBytes.get_size() > 0) {
@@ -329,7 +331,7 @@ export class ClipboardWatcher {
             return false;
 
         // Treat x-kde-passwordManagerHint as sensitive unless explicitly marked "public"
-        const hintBytes = await this.#getContentAsync(kdeHintMime);
+        const hintBytes = await this.#getContentAsync(kdeHintMime, 256);
         if (!hintBytes || hintBytes.get_size() === 0)
             return true;
 
@@ -353,24 +355,47 @@ export class ClipboardWatcher {
         });
     }
 
-    #getContentAsync(mimeType) {
+    #getContentAsync(mimeType, maxBytes = -1) {
+        // Transfer directly via Meta.Selection into our own MemoryOutputStream so
+        // steal_as_bytes() returns a transfer-full GBytes owned by GJS (avoids the
+        // transfer-none GBytes use-after-free in St.Clipboard.get_content()) and
+        // enforces a hard byte cap + cancellation inside Mutter.
         return new Promise(resolve => {
-            if (this.#destroyed || !this.#clipboard) {
+            if (this.#destroyed || !this.#selection) {
                 resolve(null);
                 return;
             }
-            this.#clipboard.get_content(CLIPBOARD_TYPE, mimeType, (_clipboard, bytes) => {
-                // `bytes` is transfer-none: St frees it as soon as this callback
-                // returns, so it must be copied here and never carried over an await.
-                // Keeping the GBytes and calling get_size()/get_data() after the
-                // await reads freed memory and aborts gnome-shell (heap corruption).
-                if (!bytes || bytes.get_size() === 0) {
-                    resolve(null);
-                    return;
+            const stream = Gio.MemoryOutputStream.new_resizable();
+            this.#selection.transfer_async(
+                SELECTION_TYPE,
+                mimeType,
+                maxBytes,
+                stream,
+                this.#cancellable,
+                (selection, res) => {
+                    try {
+                        const ok = selection.transfer_finish(res);
+                        try {
+                            stream.close(null);
+                        } catch {
+                            // already closed by mutter
+                        }
+                        if (!ok || this.#destroyed) {
+                            resolve(null);
+                            return;
+                        }
+                        const bytes = stream.steal_as_bytes();
+                        resolve(bytes && bytes.get_size() > 0 ? bytes : null);
+                    } catch {
+                        try {
+                            stream.close(null);
+                        } catch {
+                            // ignore
+                        }
+                        resolve(null);
+                    }
                 }
-                const view = bytes.get_data();
-                resolve(view ? new GLib.Bytes(new Uint8Array(view)) : null);
-            });
+            );
         });
     }
 
@@ -378,6 +403,10 @@ export class ClipboardWatcher {
         this.#destroyed = true;
         this.#captureSeq++;
         this.#cancelDebounce();
+        if (this.#cancellable) {
+            this.#cancellable.cancel();
+            this.#cancellable = null;
+        }
         if (this.#selection && this.#ownerChangedId !== 0) {
             this.#selection.disconnect(this.#ownerChangedId);
             this.#ownerChangedId = 0;

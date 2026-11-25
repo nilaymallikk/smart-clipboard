@@ -404,7 +404,11 @@ export default class SmartClipboardExtension extends Extension {
     _sendPasteKeystroke(useShift) {
         try {
             if (!this._virtualKeyboard) {
-                const seat = Clutter.get_default_backend().get_default_seat();
+                const backend = global.stage.context?.get_backend?.()
+                    ?? global.stage.get_context?.()?.get_backend?.();
+                const seat = backend?.get_default_seat?.();
+                if (!seat)
+                    return;
                 this._virtualKeyboard = seat.create_virtual_device(
                     Clutter.InputDeviceType.KEYBOARD_DEVICE
                 );
