@@ -1,3 +1,4 @@
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import St from 'gi://St';
@@ -14,6 +15,11 @@ const TEXT_MIMETYPES = [
     'STRING',
 ];
 
+const URI_LIST_MIMETYPES = [
+    'text/uri-list',
+    'x-special/gnome-copied-files',
+];
+
 const IMAGE_MIMETYPES = [
     'image/png',
     'image/jpeg',
@@ -22,6 +28,67 @@ const IMAGE_MIMETYPES = [
     'image/gif',
     'image/bmp',
 ];
+
+const EXT_TO_IMAGE_MIME = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    bmp: 'image/bmp',
+};
+
+function resolveImageFileCandidate(rawText) {
+    if (typeof rawText !== 'string')
+        return null;
+    const lines = rawText
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l.length > 0 && !l.startsWith('#') && l !== 'copy' && l !== 'cut');
+    if (lines.length !== 1)
+        return null;
+
+    let candidate = lines[0];
+    if ((candidate.startsWith('"') && candidate.endsWith('"')) ||
+        (candidate.startsWith("'") && candidate.endsWith("'"))) {
+        candidate = candidate.slice(1, -1).trim();
+    }
+
+    let file = null;
+    if (candidate.startsWith('file://')) {
+        file = Gio.File.new_for_uri(candidate);
+    } else if (candidate.startsWith('~/')) {
+        const expanded = GLib.build_filenamev([GLib.get_home_dir(), candidate.slice(2)]);
+        file = Gio.File.new_for_path(expanded);
+    } else if (candidate.startsWith('/')) {
+        file = Gio.File.new_for_path(candidate);
+    } else {
+        return null;
+    }
+
+    const path = file.get_path();
+    if (!path)
+        return null;
+    const match = path.toLowerCase().match(/\.([a-z0-9]+)$/);
+    const mimeType = match ? EXT_TO_IMAGE_MIME[match[1]] : null;
+    if (!mimeType)
+        return null;
+
+    return {file, mimeType};
+}
+
+function loadFileBytesAsync(file) {
+    return new Promise(resolve => {
+        file.load_contents_async(null, (src, res) => {
+            try {
+                const [ok, raw] = src.load_contents_finish(res);
+                resolve(ok && raw && raw.length > 0 ? new GLib.Bytes(raw) : null);
+            } catch {
+                resolve(null);
+            }
+        });
+    });
+}
 
 const ALWAYS_SENSITIVE_PREFIXES = [
     'application/x-keepassxc-',
@@ -165,38 +232,85 @@ export class ClipboardWatcher {
             return;
 
         const hasTextMime = TEXT_MIMETYPES.some(m => mimetypes.includes(m));
+        const uriMime = URI_LIST_MIMETYPES.find(m => mimetypes.includes(m)) ?? null;
         const imageMime = IMAGE_MIMETYPES.find(m => mimetypes.includes(m)) ?? null;
 
+        // 1. Prefer raw image clipboard data first so copied images don't get captured as filenames/URLs
+        if (this.#captureImages && imageMime) {
+            const bytes = await this.#getContentAsync(imageMime);
+            if (this.#destroyed || this.#paused || seq !== this.#captureSeq)
+                return;
+            if (bytes) {
+                const sizeBytes = bytes.get_size();
+                const maxBytes = this.#maxImageSizeMb * 1024 * 1024;
+                if (sizeBytes > 0 && sizeBytes <= maxBytes) {
+                    const hash = GLib.compute_checksum_for_bytes(GLib.ChecksumType.SHA256, bytes);
+                    if (!this.#isSuppressed(hash))
+                        await this.#onImage?.(bytes, imageMime);
+                    return;
+                }
+            }
+        }
+
+        // 2. Copied image files from file managers (text/uri-list or x-special/gnome-copied-files)
+        if (this.#captureImages && uriMime) {
+            const uriBytes = await this.#getContentAsync(uriMime);
+            if (this.#destroyed || this.#paused || seq !== this.#captureSeq)
+                return;
+            if (uriBytes && uriBytes.get_size() > 0) {
+                const decoded = this.#decoder.decode(uriBytes.get_data());
+                if (await this.#tryCaptureImageFile(decoded, seq))
+                    return;
+            }
+        }
+
+        // 3. Text clipboard data (also upgrades single local image file paths to real images)
         if (hasTextMime) {
             const text = await this.#getTextAsync();
             if (this.#destroyed || this.#paused || seq !== this.#captureSeq)
                 return;
 
             if (text && text.trim().length > 0) {
+                if (this.#captureImages && await this.#tryCaptureImageFile(text, seq))
+                    return;
+
                 const hash = GLib.compute_checksum_for_string(GLib.ChecksumType.SHA256, text, -1);
                 if (!this.#isSuppressed(hash))
                     await this.#onText?.(text);
                 return;
             }
-            // If text was empty/whitespace and an image mimetype is also offered, fall through to image
         }
+    }
 
-        if (this.#captureImages && imageMime) {
-            const bytes = await this.#getContentAsync(imageMime);
-            if (this.#destroyed || this.#paused || seq !== this.#captureSeq)
-                return;
-            if (!bytes)
-                return;
+    async #tryCaptureImageFile(rawText, seq) {
+        const candidate = resolveImageFileCandidate(rawText);
+        if (!candidate)
+            return false;
 
-            const sizeBytes = bytes.get_size();
+        try {
+            const info = candidate.file.query_info(
+                'standard::type,standard::size',
+                Gio.FileQueryInfoFlags.NONE,
+                null
+            );
+            if (info.get_file_type() !== Gio.FileType.REGULAR)
+                return false;
+            const sizeBytes = info.get_size();
             const maxBytes = this.#maxImageSizeMb * 1024 * 1024;
             if (sizeBytes <= 0 || sizeBytes > maxBytes)
-                return;
-
-            const hash = GLib.compute_checksum_for_bytes(GLib.ChecksumType.SHA256, bytes);
-            if (!this.#isSuppressed(hash))
-                await this.#onImage?.(bytes, imageMime);
+                return false;
+        } catch {
+            return false;
         }
+
+        const bytes = await loadFileBytesAsync(candidate.file);
+        if (this.#destroyed || this.#paused || seq !== this.#captureSeq || !bytes)
+            return false;
+
+        const hash = GLib.compute_checksum_for_bytes(GLib.ChecksumType.SHA256, bytes);
+        if (!this.#isSuppressed(hash))
+            await this.#onImage?.(bytes, candidate.mimeType);
+        return true;
     }
 
     async #isSensitive(mimetypes) {

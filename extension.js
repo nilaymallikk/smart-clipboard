@@ -18,6 +18,8 @@ import {HistoryStore} from './historyStore.js';
 import {SmartClipboardIndicator} from './popupUi.js';
 
 const SHORTCUT_KEY = 'toggle-shortcut';
+const SHELL_KEYBINDINGS_SCHEMA = 'org.gnome.shell.keybindings';
+const MESSAGE_TRAY_KEY = 'toggle-message-tray';
 const AUTO_PASTE_DELAY_MS = 110;
 const TERMINAL_CLASS_RE = /(terminal|ptyxis|kgx|console|alacritty|kitty|wezterm|foot|ghostty|tilix|konsole|terminator|xterm|urxvt|st-256color|rio|warp|hyper)/i;
 
@@ -33,6 +35,8 @@ export default class SmartClipboardExtension extends Extension {
         this._popupSizeId = 0;
         this._lastFocusWindow = null;
         this._virtualKeyboard = null;
+        this._shellKeybindings = null;
+        this._savedMessageTrayShortcut = null;
 
         this._store = new HistoryStore({
             uuid: this.uuid,
@@ -89,6 +93,8 @@ export default class SmartClipboardExtension extends Extension {
 
         Main.panel.addToStatusArea(this.uuid, this._indicator);
 
+        this._claimToggleShortcut();
+
         Main.wm.addKeybinding(
             SHORTCUT_KEY,
             this._settings,
@@ -110,6 +116,37 @@ export default class SmartClipboardExtension extends Extension {
         this._store.load().catch(e => {
             console.warn(`[smart-clipboard] Initial store load failed: ${e.message}`);
         });
+    }
+
+    _claimToggleShortcut() {
+        // GNOME Shell binds <Super>v to toggle-message-tray by default alongside <Super>m.
+        // Release any conflicting binding from toggle-message-tray while active so Super+V opens Smart Clipboard.
+        try {
+            const wanted = this._settings.get_strv(SHORTCUT_KEY).map(s => s.toLowerCase());
+            if (wanted.length === 0)
+                return;
+            this._shellKeybindings = new Gio.Settings({schema_id: SHELL_KEYBINDINGS_SCHEMA});
+            const current = this._shellKeybindings.get_strv(MESSAGE_TRAY_KEY);
+            const filtered = current.filter(accel => !wanted.includes(accel.toLowerCase()));
+            if (filtered.length !== current.length) {
+                this._savedMessageTrayShortcut = current;
+                this._shellKeybindings.set_strv(MESSAGE_TRAY_KEY, filtered);
+            }
+        } catch (e) {
+            console.warn(`[smart-clipboard] Shortcut conflict check skipped: ${e.message}`);
+        }
+    }
+
+    _restoreToggleShortcut() {
+        if (this._shellKeybindings && this._savedMessageTrayShortcut) {
+            try {
+                this._shellKeybindings.set_strv(MESSAGE_TRAY_KEY, this._savedMessageTrayShortcut);
+            } catch {
+                // ignore
+            }
+        }
+        this._savedMessageTrayShortcut = null;
+        this._shellKeybindings = null;
     }
 
     _getFocusedAppName() {
@@ -374,6 +411,12 @@ export default class SmartClipboardExtension extends Extension {
             break;
         }
 
+        case 'toggle-shortcut':
+            this._restoreToggleShortcut();
+            this._claimToggleShortcut();
+            this._dbusService?.emitChanged();
+            break;
+
         case 'wipe-nonce':
             this._store.wipeAll().catch(e => {
                 console.warn(`[smart-clipboard] Wipe failed: ${e.message}`);
@@ -387,6 +430,7 @@ export default class SmartClipboardExtension extends Extension {
 
     disable() {
         Main.wm.removeKeybinding(SHORTCUT_KEY);
+        this._restoreToggleShortcut();
 
         if (this._pasteTimeoutId !== 0) {
             GLib.Source.remove(this._pasteTimeoutId);

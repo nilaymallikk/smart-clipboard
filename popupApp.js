@@ -20,6 +20,7 @@ import {
     formatRelativeTime,
     formatTextPreview,
     parseCssColor,
+    resolveEntryImage,
 } from './popupClient.js';
 
 const STRIP_COUNT = 3;
@@ -453,20 +454,16 @@ class SmartClipboardPopupApp {
         });
         overlay._scEntry = entry;
 
-        // Visual preview surface
-        if (entry.type === 'image') {
+        // Visual preview surface (renders real images for both image entries and local image paths)
+        const resolvedImg = resolveEntryImage(entry);
+        if (resolvedImg) {
             const pic = new Gtk.Picture({
                 content_fit: Gtk.ContentFit.COVER,
                 can_shrink: true,
                 hexpand: true,
                 vexpand: true,
             });
-            const path = entry.imagePath || entry.thumbPath;
-            if (path) {
-                const f = Gio.File.new_for_path(path);
-                if (f.query_exists(null))
-                    pic.set_file(f);
-            }
+            pic.set_file(resolvedImg.file);
             overlay.set_child(pic);
         } else if (entry.subtype === 'color') {
             const parsed = parseCssColor(entry.colorValue || entry.text);
@@ -631,7 +628,8 @@ class SmartClipboardPopupApp {
             hexpand: true,
         });
 
-        if (entry.type === 'image') {
+        const resolvedImg = resolveEntryImage(entry);
+        if (resolvedImg) {
             const pic = new Gtk.Picture({
                 content_fit: Gtk.ContentFit.COVER,
                 can_shrink: true,
@@ -640,12 +638,8 @@ class SmartClipboardPopupApp {
                 css_classes: ['sc-drawer-thumb'],
                 overflow: Gtk.Overflow.HIDDEN,
             });
-            const p = entry.thumbPath || entry.imagePath;
-            if (p) {
-                const f = Gio.File.new_for_path(p);
-                if (f.query_exists(null))
-                    pic.set_file(f);
-            }
+            const thumbFile = Gio.File.new_for_path(resolvedImg.thumbPath);
+            pic.set_file(thumbFile.query_exists(null) ? thumbFile : resolvedImg.file);
             hbox.append(pic);
         } else if (entry.subtype === 'color') {
             const parsed = parseCssColor(entry.colorValue || entry.text);
@@ -665,8 +659,10 @@ class SmartClipboardPopupApp {
             valign: Gtk.Align.CENTER,
         });
         col.append(new Gtk.Label({
-            label: entry.type === 'image'
-                ? `Image${entry.width && entry.height ? ` ${entry.width}×${entry.height}` : ''}`
+            label: resolvedImg
+                ? (entry.type === 'image'
+                    ? `Image${entry.width && entry.height ? ` ${entry.width}×${entry.height}` : ''}`
+                    : resolvedImg.file.get_basename())
                 : formatTextPreview(entry.text, 1, 95, ' '),
             xalign: 0,
             ellipsize: Pango.EllipsizeMode.END,
@@ -720,21 +716,19 @@ class SmartClipboardPopupApp {
         dragSource.connect('drag-begin', (src, drag) => {
             this.#isDragging = true;
             this.#cancelFocusAutoHide();
-            if (entry.type === 'image') {
-                const p = entry.thumbPath || entry.imagePath;
-                if (p) {
-                    try {
-                        src.set_icon(Gdk.Texture.new_from_filename(p), 12, 12);
-                        return;
-                    } catch {
-                        // fallback to label
-                    }
+            const resolvedImg = resolveEntryImage(entry);
+            if (resolvedImg) {
+                try {
+                    src.set_icon(Gdk.Texture.new_from_filename(resolvedImg.thumbPath), 12, 12);
+                    return;
+                } catch {
+                    // fallback to label
                 }
             }
             const icon = Gtk.DragIcon.get_for_drag(drag);
             if (icon) {
                 icon.set_child(new Gtk.Label({
-                    label: entry.type === 'image' ? 'Image' : formatTextPreview(entry.text, 1, 36, ' '),
+                    label: resolvedImg ? 'Image' : formatTextPreview(entry.text, 1, 36, ' '),
                     css_classes: ['sc-drag-badge'],
                 }));
             }
@@ -784,9 +778,12 @@ class SmartClipboardPopupApp {
         this.#inModal = true;
         this.#cancelFocusAutoHide();
 
+        const resolvedImg = resolveEntryImage(entry);
         const dialog = new Adw.Dialog({
-            title: entry.type === 'image'
-                ? `Image${entry.width && entry.height ? ` (${entry.width}×${entry.height})` : ''}`
+            title: resolvedImg
+                ? (entry.type === 'image' && entry.width && entry.height
+                    ? `Image (${entry.width}×${entry.height})`
+                    : resolvedImg.file.get_basename())
                 : 'Preview',
             content_width: 580,
             content_height: 440,
@@ -803,7 +800,7 @@ class SmartClipboardPopupApp {
             vexpand: true,
         });
 
-        if (entry.type === 'image') {
+        if (resolvedImg) {
             const stage = new Gtk.Box({css_classes: ['sc-dialog-image'], hexpand: true, vexpand: true});
             const pic = new Gtk.Picture({
                 content_fit: Gtk.ContentFit.CONTAIN,
@@ -811,12 +808,7 @@ class SmartClipboardPopupApp {
                 hexpand: true,
                 vexpand: true,
             });
-            const p = entry.imagePath || entry.thumbPath;
-            if (p) {
-                const f = Gio.File.new_for_path(p);
-                if (f.query_exists(null))
-                    pic.set_file(f);
-            }
+            pic.set_file(resolvedImg.file);
             stage.append(pic);
             body.append(stage);
         } else {

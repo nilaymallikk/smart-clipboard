@@ -12,6 +12,70 @@ import {formatBytes, scoreMatch} from './historyStore.js';
 export const PIN_DRAG_MIME = 'application/x-smart-clipboard-pin-id';
 const ENCODER = new TextEncoder();
 
+const EXT_TO_IMAGE_MIME = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    bmp: 'image/bmp',
+};
+
+export function resolveEntryImage(entry) {
+    if (!entry)
+        return null;
+
+    if (entry.type === 'image') {
+        const path = entry.imagePath || entry.thumbPath || null;
+        if (!path)
+            return null;
+        const file = Gio.File.new_for_path(path);
+        if (!file.query_exists(null))
+            return null;
+        return {
+            path,
+            thumbPath: entry.thumbPath || path,
+            mimeType: entry.mimeType || 'image/png',
+            file,
+        };
+    }
+
+    if (entry.type === 'text' && typeof entry.text === 'string') {
+        const trimmed = entry.text.trim();
+        if (!trimmed || trimmed.includes('\n'))
+            return null;
+
+        let candidate = trimmed;
+        if ((candidate.startsWith('"') && candidate.endsWith('"')) ||
+            (candidate.startsWith("'") && candidate.endsWith("'"))) {
+            candidate = candidate.slice(1, -1).trim();
+        }
+
+        let file = null;
+        if (candidate.startsWith('file://')) {
+            file = Gio.File.new_for_uri(candidate);
+        } else if (candidate.startsWith('~/')) {
+            file = Gio.File.new_for_path(GLib.build_filenamev([GLib.get_home_dir(), candidate.slice(2)]));
+        } else if (candidate.startsWith('/')) {
+            file = Gio.File.new_for_path(candidate);
+        } else {
+            return null;
+        }
+
+        const path = file.get_path();
+        if (!path)
+            return null;
+        const m = path.toLowerCase().match(/\.([a-z0-9]+)$/);
+        const mimeType = m ? EXT_TO_IMAGE_MIME[m[1]] : null;
+        if (!mimeType || !file.query_exists(null))
+            return null;
+
+        return {path, thumbPath: path, mimeType, file};
+    }
+
+    return null;
+}
+
 export {formatBytes};
 
 export function formatRelativeTime(timestampMs, nowMs = Date.now()) {
@@ -108,9 +172,9 @@ export function filterEntries(entries, query, category = 'all') {
             case 'pinned':
                 return Boolean(entry.pinned);
             case 'text':
-                return entry.type === 'text';
+                return entry.type === 'text' && !resolveEntryImage(entry);
             case 'image':
-                return entry.type === 'image';
+                return entry.type === 'image' || Boolean(resolveEntryImage(entry));
             case 'url':
                 return entry.type === 'text' && (entry.subtype === 'url' || entry.isUrl);
             case 'code':
@@ -169,30 +233,27 @@ export function buildDragContentProvider(entry, Gdk, {includePinOrder = false} =
         ));
     }
 
-    if (entry.type === 'image' && entry.imagePath) {
-        const file = Gio.File.new_for_path(entry.imagePath);
-        if (file.query_exists(null)) {
-            const fileList = Gdk.FileList.new_from_array([file]);
-            const fileListVal = new GObject.Value();
-            fileListVal.init(Gdk.FileList.$gtype);
-            fileListVal.set_boxed(fileList);
-            providers.push(Gdk.ContentProvider.new_for_value(fileListVal));
+    const resolvedImage = resolveEntryImage(entry);
+    if (resolvedImage) {
+        const {file, mimeType} = resolvedImage;
+        const fileList = Gdk.FileList.new_from_array([file]);
+        const fileListVal = new GObject.Value();
+        fileListVal.init(Gdk.FileList.$gtype);
+        fileListVal.set_boxed(fileList);
+        providers.push(Gdk.ContentProvider.new_for_value(fileListVal));
 
-            const uriPayload = `${file.get_uri()}\r\n`;
-            providers.push(Gdk.ContentProvider.new_for_bytes(
-                'text/uri-list',
-                new GLib.Bytes(ENCODER.encode(uriPayload))
-            ));
+        const uriPayload = `${file.get_uri()}\r\n`;
+        providers.push(Gdk.ContentProvider.new_for_bytes(
+            'text/uri-list',
+            new GLib.Bytes(ENCODER.encode(uriPayload))
+        ));
 
-            try {
-                const [ok, rawBytes] = file.load_contents(null);
-                if (ok && rawBytes && rawBytes.length > 0) {
-                    const mime = entry.mimeType || 'image/png';
-                    providers.push(Gdk.ContentProvider.new_for_bytes(mime, new GLib.Bytes(rawBytes)));
-                }
-            } catch (e) {
-                console.warn(`[smart-clipboard] Drag image read failed: ${e.message}`);
-            }
+        try {
+            const [ok, rawBytes] = file.load_contents(null);
+            if (ok && rawBytes && rawBytes.length > 0)
+                providers.push(Gdk.ContentProvider.new_for_bytes(mimeType, new GLib.Bytes(rawBytes)));
+        } catch (e) {
+            console.warn(`[smart-clipboard] Drag image read failed: ${e.message}`);
         }
     } else if (entry.type === 'text') {
         const textVal = new GObject.Value();

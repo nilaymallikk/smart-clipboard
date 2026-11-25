@@ -33,20 +33,33 @@ class SmartClipboardIndicator extends PanelMenu.Button {
         });
         this.add_child(this._panelIcon);
 
+        // Disable PanelMenu.Button's default ClickGesture so left-click opens the
+        // floating preview directly instead of dropping down a text menu.
+        if (this._clickGesture)
+            this._clickGesture.set_enabled(false);
+
+        this._scClickGesture = new Clutter.ClickGesture({
+            recognize_on_press: true,
+        });
+        this._scClickGesture.connect('recognize', gesture => {
+            const event = gesture.get_point_event?.(0);
+            const button = event?.get_button?.() ?? Clutter.BUTTON_PRIMARY;
+            if (button === Clutter.BUTTON_SECONDARY) {
+                this.menu.toggle();
+                return;
+            }
+            if (this.menu.isOpen)
+                this.menu.close();
+            this._onTogglePopup?.();
+        });
+        this.add_action(this._scClickGesture);
+
         this._buildQuickMenu();
         this.setPaused(isPaused);
         this.setAutoPaste(autoPaste);
     }
 
     _buildQuickMenu() {
-        const openItem = new PopupMenu.PopupMenuItem('Open Smart Clipboard');
-        openItem.connect('activate', () => {
-            this._onTogglePopup?.();
-        });
-        this.menu.addMenuItem(openItem);
-
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
         this._privateSwitch = new PopupMenu.PopupSwitchMenuItem('Private Mode (Pause)', this._paused);
         this._privateSwitch.connect('toggled', (_item, state) => {
             if (!this._syncingSwitches)
@@ -54,7 +67,7 @@ class SmartClipboardIndicator extends PanelMenu.Button {
         });
         this.menu.addMenuItem(this._privateSwitch);
 
-        this._autoPasteSwitch = new PopupMenu.PopupSwitchMenuItem('Auto-Paste on Enter', this._autoPaste);
+        this._autoPasteSwitch = new PopupMenu.PopupSwitchMenuItem('Auto-Paste on Click', this._autoPaste);
         this._autoPasteSwitch.connect('toggled', (_item, state) => {
             if (!this._syncingSwitches)
                 this._onToggleAutoPaste?.(state);
@@ -74,23 +87,6 @@ class SmartClipboardIndicator extends PanelMenu.Button {
             this._onOpenPreferences?.();
         });
         this.menu.addMenuItem(prefsItem);
-    }
-
-    vfunc_event(event) {
-        if (event.type() === Clutter.EventType.BUTTON_PRESS) {
-            const button = event.get_button();
-            if (button === Clutter.BUTTON_PRIMARY) {
-                if (this.menu.isOpen)
-                    this.menu.close();
-                this._onTogglePopup?.();
-                return Clutter.EVENT_STOP;
-            }
-            if (button === Clutter.BUTTON_SECONDARY) {
-                this.menu.toggle();
-                return Clutter.EVENT_STOP;
-            }
-        }
-        return super.vfunc_event(event);
     }
 
     setPaused(paused) {
@@ -122,6 +118,10 @@ class SmartClipboardIndicator extends PanelMenu.Button {
     }
 
     destroy() {
+        if (this._scClickGesture) {
+            this.remove_action(this._scClickGesture);
+            this._scClickGesture = null;
+        }
         this._onTogglePopup = null;
         this._onTogglePause = null;
         this._onToggleAutoPaste = null;

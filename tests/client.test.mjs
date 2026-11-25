@@ -10,6 +10,7 @@ import {
     formatRelativeTime,
     formatTextPreview,
     parseCssColor,
+    resolveEntryImage,
 } from '../popupClient.js';
 
 function assert(cond, msg) {
@@ -85,6 +86,24 @@ try {
     assert(imgFormats.includes('text/uri-list'), `image drag includes text/uri-list (${imgFormats})`);
     assert(imgFormats.includes('image/png'), `image drag includes image/png (${imgFormats})`);
     assert(imgFormats.includes(PIN_DRAG_MIME), `pinned image drag includes reorder mime (${imgFormats})`);
+
+    // Text entry whose text is an existing local image path resolves as an image preview & file drag
+    const pathTextEntry = {
+        id: 'path-1',
+        type: 'text',
+        subtype: 'text',
+        text: imgPath,
+        pinned: false,
+        updatedAt: 500,
+    };
+    const resolvedFromPath = resolveEntryImage(pathTextEntry);
+    assert(resolvedFromPath && resolvedFromPath.path === imgPath && resolvedFromPath.mimeType === 'image/png',
+        'resolves existing local image path string as image preview');
+    const pathDragFormats = buildDragContentProvider(pathTextEntry, Gdk).ref_formats().to_string();
+    assert(pathDragFormats.includes('GdkFileList') && pathDragFormats.includes('image/png'),
+        `local image path drags as image file (${pathDragFormats})`);
+    assert(filterEntries([pathTextEntry], '', 'text').length === 0, 'Text filter excludes local image paths');
+    assert(filterEntries([pathTextEntry], '', 'image').length === 1, 'Image filter includes local image paths');
 
     // Verify file exists check fails safely when path missing
     const missingProvider = buildDragContentProvider({id: 'x', type: 'image', imagePath: '/nonexistent/foo.png'}, Gdk);
