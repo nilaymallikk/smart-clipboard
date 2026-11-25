@@ -37,44 +37,22 @@ export function formatRelativeTime(timestampMs, nowMs = Date.now()) {
     return dt ? dt.format('%b %e') : '';
 }
 
-export function formatTextPreview(text, maxLines = 2, maxChars = 140) {
+export function formatTextPreview(text, maxLines = 2, maxChars = 140, separator = '\n') {
     const rawLines = (text ?? '').replace(/\r\n/g, '\n').split('\n');
     const kept = [];
     for (const line of rawLines) {
-        const cleaned = line.replace(/\t/g, '  ').trim();
-        if (cleaned.length > 0)
-            kept.push(cleaned);
+        const cleaned = line.replace(/\t/g, '  ').trimEnd();
+        if (cleaned.trim().length > 0)
+            kept.push(cleaned.trimStart());
         if (kept.length >= maxLines)
             break;
     }
-    let out = kept.join(' ↵ ');
+    let out = kept.join(separator);
     if (!out)
         out = (text ?? '').trim();
     if (out.length > maxChars)
         out = `${out.slice(0, maxChars - 1)}…`;
     return out;
-}
-
-export function transformText(text, mode) {
-    const src = String(text ?? '');
-    switch (mode) {
-    case 'trim':
-        return src.trim();
-    case 'single-line':
-        return src.replace(/\s+/g, ' ').trim();
-    case 'upper':
-        return src.toUpperCase();
-    case 'lower':
-        return src.toLowerCase();
-    case 'format-json': {
-        const parsed = JSON.parse(src.trim());
-        return JSON.stringify(parsed, null, 2);
-    }
-    case 'url-decode':
-        return decodeURIComponent(src.trim());
-    default:
-        return src;
-    }
 }
 
 export function parseCssColor(colorStr) {
@@ -296,11 +274,6 @@ export class ClipboardServiceClient {
         return Boolean(res.deepUnpack()[0]);
     }
 
-    async copyText(text, paste = false) {
-        const res = await this.#call('CopyText', new GLib.Variant('(sb)', [text, Boolean(paste)]), new GLib.VariantType('(b)'));
-        return Boolean(res.deepUnpack()[0]);
-    }
-
     async togglePin(id) {
         const res = await this.#call('TogglePin', new GLib.Variant('(s)', [id]), new GLib.VariantType('(b)'));
         return Boolean(res.deepUnpack()[0]);
@@ -308,11 +281,6 @@ export class ClipboardServiceClient {
 
     async reorderPinned(sourceId, targetId) {
         const res = await this.#call('ReorderPinned', new GLib.Variant('(ss)', [sourceId, targetId]), new GLib.VariantType('(b)'));
-        return Boolean(res.deepUnpack()[0]);
-    }
-
-    async updateText(id, newText) {
-        const res = await this.#call('UpdateText', new GLib.Variant('(ss)', [id, newText]), new GLib.VariantType('(b)'));
         return Boolean(res.deepUnpack()[0]);
     }
 
@@ -333,14 +301,6 @@ export class ClipboardServiceClient {
 
     async setPaused(paused) {
         await this.#call('SetPaused', new GLib.Variant('(b)', [Boolean(paused)]), new GLib.VariantType('(b)'));
-    }
-
-    async setShowPreview(show) {
-        await this.#call('SetShowPreview', new GLib.Variant('(b)', [Boolean(show)]), new GLib.VariantType('(b)'));
-    }
-
-    async setKeepOpen(keepOpen) {
-        await this.#call('SetKeepOpen', new GLib.Variant('(b)', [Boolean(keepOpen)]), new GLib.VariantType('(b)'));
     }
 
     async openPreferences() {

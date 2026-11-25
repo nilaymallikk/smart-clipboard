@@ -20,11 +20,6 @@ export const SERVICE_IFACE_XML = `
       <arg type="b" direction="in" name="paste"/>
       <arg type="b" direction="out" name="ok"/>
     </method>
-    <method name="CopyText">
-      <arg type="s" direction="in" name="text"/>
-      <arg type="b" direction="in" name="paste"/>
-      <arg type="b" direction="out" name="ok"/>
-    </method>
     <method name="TogglePin">
       <arg type="s" direction="in" name="id"/>
       <arg type="b" direction="out" name="pinned"/>
@@ -32,11 +27,6 @@ export const SERVICE_IFACE_XML = `
     <method name="ReorderPinned">
       <arg type="s" direction="in" name="sourceId"/>
       <arg type="s" direction="in" name="targetId"/>
-      <arg type="b" direction="out" name="ok"/>
-    </method>
-    <method name="UpdateText">
-      <arg type="s" direction="in" name="id"/>
-      <arg type="s" direction="in" name="newText"/>
       <arg type="b" direction="out" name="ok"/>
     </method>
     <method name="DeleteEntry">
@@ -51,14 +41,6 @@ export const SERVICE_IFACE_XML = `
     </method>
     <method name="SetPaused">
       <arg type="b" direction="in" name="paused"/>
-      <arg type="b" direction="out" name="ok"/>
-    </method>
-    <method name="SetShowPreview">
-      <arg type="b" direction="in" name="show"/>
-      <arg type="b" direction="out" name="ok"/>
-    </method>
-    <method name="SetKeepOpen">
-      <arg type="b" direction="in" name="keepOpen"/>
       <arg type="b" direction="out" name="ok"/>
     </method>
     <method name="OpenPreferences">
@@ -128,28 +110,12 @@ export class ClipboardDBusService {
             });
     }
 
-    CopyTextAsync(params, invocation) {
-        const [text, paste] = params;
-        Promise.resolve(this.#handlers?.copyText?.(text, paste))
-            .then(ok => {
-                invocation.return_value(new GLib.Variant('(b)', [Boolean(ok)]));
-            })
-            .catch(e => {
-                console.warn(`[smart-clipboard] CopyText error: ${e.message}`);
-                invocation.return_value(new GLib.Variant('(b)', [false]));
-            });
-    }
-
     TogglePin(id) {
         return Boolean(this.#handlers?.togglePin?.(id));
     }
 
     ReorderPinned(sourceId, targetId) {
         return Boolean(this.#handlers?.reorderPinned?.(sourceId, targetId));
-    }
-
-    UpdateText(id, newText) {
-        return Boolean(this.#handlers?.updateText?.(id, newText));
     }
 
     DeleteEntry(id) {
@@ -166,16 +132,6 @@ export class ClipboardDBusService {
 
     SetPaused(paused) {
         this.#handlers?.setPaused?.(Boolean(paused));
-        return true;
-    }
-
-    SetShowPreview(show) {
-        this.#handlers?.setShowPreview?.(Boolean(show));
-        return true;
-    }
-
-    SetKeepOpen(keepOpen) {
-        this.#handlers?.setKeepOpen?.(Boolean(keepOpen));
         return true;
     }
 

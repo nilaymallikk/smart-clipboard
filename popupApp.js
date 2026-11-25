@@ -20,20 +20,9 @@ import {
     formatRelativeTime,
     formatTextPreview,
     parseCssColor,
-    transformText,
 } from './popupClient.js';
-import {PreviewPane} from './popupPreview.js';
 
-const CATEGORIES = [
-    {id: 'all', label: 'All'},
-    {id: 'pinned', label: 'Pinned'},
-    {id: 'text', label: 'Text'},
-    {id: 'image', label: 'Images'},
-    {id: 'url', label: 'Links'},
-    {id: 'code', label: 'Code'},
-    {id: 'color', label: 'Colors'},
-];
-
+const FEATURED_COUNT = 3;
 const DECODER = new TextDecoder('utf-8');
 const MODULE_DIR = Gio.File.new_for_uri(import.meta.url).get_parent().get_path();
 
@@ -41,30 +30,19 @@ class SmartClipboardPopupApp {
     #app;
     #window = null;
     #toastOverlay = null;
-    #titleWidget = null;
-    #paned = null;
     #searchEntry = null;
     #pausedBanner = null;
     #listBox = null;
     #emptyStack = null;
-    #preview = null;
-    #keepOpenBtn = null;
-    #previewToggleBtn = null;
     #pauseToggleBtn = null;
     #clearBtn = null;
-    #filterButtons = new Map();
 
     #client = null;
     #dbusExport = null;
 
     #entries = [];
     #filtered = [];
-    #category = 'all';
-    #selectedId = null;
     #paused = false;
-    #autoPaste = true;
-    #showPreview = true;
-    #keepOpen = false;
     #isDragging = false;
     #inModal = false;
     #syncingToggles = false;
@@ -75,7 +53,6 @@ class SmartClipboardPopupApp {
             application_id: POPUP_APP_ID,
             flags: Gio.ApplicationFlags.DEFAULT_FLAGS,
         });
-
         this.#app.connect('startup', () => this.#onStartup());
         this.#app.connect('activate', () => this.#showWindow());
         this.#app.connect('shutdown', () => this.#onShutdown());
@@ -120,8 +97,8 @@ class SmartClipboardPopupApp {
         this.#window = new Adw.ApplicationWindow({
             application: this.#app,
             title: 'Smart Clipboard',
-            default_width: 860,
-            default_height: 560,
+            default_width: 480,
+            default_height: 700,
             resizable: true,
             css_classes: ['sc-window'],
         });
@@ -138,7 +115,6 @@ class SmartClipboardPopupApp {
                 this.#cancelFocusAutoHide();
         });
 
-        // Global window key controller
         const keyCtrl = new Gtk.EventControllerKey({
             propagation_phase: Gtk.PropagationPhase.CAPTURE,
         });
@@ -149,208 +125,12 @@ class SmartClipboardPopupApp {
         const toolbarView = new Adw.ToolbarView();
         toolbarView.add_top_bar(this.#buildHeaderBar());
 
-        // Split layout: left list + right live preview
-        this.#paned = new Gtk.Paned({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            shrink_start_child: false,
-            shrink_end_child: false,
-            resize_start_child: true,
-            resize_end_child: true,
-            position: 410,
-            hexpand: true,
-            vexpand: true,
-        });
-
-        this.#paned.set_start_child(this.#buildLeftPane());
-        this.#preview = new PreviewPane({
-            onPaste: entry => this.#activateEntry(entry, true),
-            onCopy: entry => this.#copyEntryOnly(entry),
-            onCopyTransformed: (text, toastMsg) => this.#copyPlainText(text, false, toastMsg),
-            onTogglePin: entry => this.#togglePin(entry.id),
-            onSaveEdit: (id, newText) => this.#saveEdit(id, newText),
-            onDelete: entry => this.#deleteEntry(entry.id),
-            onToast: msg => this.#showToast(msg),
-            onDragStateChanged: dragging => {
-                this.#isDragging = dragging;
-                if (dragging)
-                    this.#cancelFocusAutoHide();
-            },
-            onModalStateChanged: open => {
-                this.#inModal = open;
-                if (open)
-                    this.#cancelFocusAutoHide();
-            },
-        });
-        this.#paned.set_end_child(this.#preview.widget);
-
-        this.#toastOverlay = new Adw.ToastOverlay({
-            child: this.#paned,
-        });
-        toolbarView.set_content(this.#toastOverlay);
-        this.#window.set_content(toolbarView);
-    }
-
-    #buildHeaderBar() {
-        const header = new Adw.HeaderBar();
-
-        this.#titleWidget = new Adw.WindowTitle({
-            title: 'Smart Clipboard',
-            subtitle: '',
-        });
-        header.set_title_widget(this.#titleWidget);
-
-        this.#keepOpenBtn = new Gtk.ToggleButton({
-            icon_name: 'view-pin-symbolic',
-            tooltip_text: 'Keep window open while dragging & dropping',
-        });
-        this.#keepOpenBtn.connect('toggled', () => {
-            if (this.#syncingToggles)
-                return;
-            this.#keepOpen = this.#keepOpenBtn.get_active();
-            this.#client?.setKeepOpen(this.#keepOpen).catch(() => {});
-            this.#showToast(this.#keepOpen
-                ? 'Window pinned open — drag freely into other apps'
-                : 'Auto-hide on focus loss restored');
-        });
-
-        this.#previewToggleBtn = new Gtk.ToggleButton({
-            icon_name: 'sidebar-show-right-symbolic',
-            active: true,
-            tooltip_text: 'Toggle preview pane (Ctrl+\\)',
-        });
-        this.#previewToggleBtn.connect('toggled', () => {
-            if (this.#syncingToggles)
-                return;
-            this.#applyPreviewVisible(this.#previewToggleBtn.get_active(), true);
-        });
-
-        header.pack_start(this.#keepOpenBtn);
-        header.pack_start(this.#previewToggleBtn);
-
-        this.#pauseToggleBtn = new Gtk.ToggleButton({
-            icon_name: 'action-unavailable-symbolic',
-            tooltip_text: 'Private Mode — pause clipboard recording',
-        });
-        this.#pauseToggleBtn.connect('toggled', () => {
-            if (this.#syncingToggles)
-                return;
-            this.#client?.setPaused(this.#pauseToggleBtn.get_active()).catch(() => {});
-        });
-
-        this.#clearBtn = new Gtk.Button({
-            icon_name: 'edit-clear-all-symbolic',
-            tooltip_text: 'Clear all unpinned items',
-        });
-        this.#clearBtn.connect('clicked', () => this.#clearUnpinned());
-
-        const helpBtn = new Gtk.MenuButton({
-            icon_name: 'preferences-desktop-keyboard-shortcuts-symbolic',
-            tooltip_text: 'Keyboard shortcuts',
-            popover: this.#buildShortcutsPopover(),
-        });
-
-        const prefsBtn = new Gtk.Button({
-            icon_name: 'preferences-system-symbolic',
-            tooltip_text: 'Preferences',
-        });
-        prefsBtn.connect('clicked', () => {
-            this.#hideWindow();
-            this.#client?.openPreferences().catch(() => {});
-        });
-
-        header.pack_end(prefsBtn);
-        header.pack_end(helpBtn);
-        header.pack_end(this.#clearBtn);
-        header.pack_end(this.#pauseToggleBtn);
-
-        return header;
-    }
-
-    #buildShortcutsPopover() {
-        const popover = new Gtk.Popover();
-        const grid = new Gtk.Grid({
-            column_spacing: 16,
-            row_spacing: 6,
-            css_classes: ['sc-shortcuts-grid'],
-        });
-        const shortcuts = [
-            ['Enter / Double-click', 'Paste (or copy & close)'],
-            ['Shift + Enter', 'Paste as clean single-line text'],
-            ['Ctrl + C', 'Copy without closing'],
-            ['Ctrl + P', 'Pin / unpin selected'],
-            ['Ctrl + E', 'Edit selected text inline'],
-            ['Ctrl + \\', 'Toggle preview pane'],
-            ['Alt + 1…9', 'Instant paste item #1–9'],
-            ['Ctrl + 1…7', 'Switch category filter'],
-            ['Delete', 'Delete selected item'],
-            ['Ctrl + Z', 'Undo last delete'],
-            ['Drag row / preview', 'Drop into any app or reorder pins'],
-            ['Escape', 'Clear search or close'],
-        ];
-        shortcuts.forEach(([key, desc], idx) => {
-            grid.attach(new Gtk.Label({label: key, xalign: 0, css_classes: ['caption', 'monospace']}), 0, idx, 1, 1);
-            grid.attach(new Gtk.Label({label: desc, xalign: 0, css_classes: ['caption', 'dim-label']}), 1, idx, 1, 1);
-        });
-        popover.set_child(grid);
-        return popover;
-    }
-
-    #buildLeftPane() {
-        const left = new Gtk.Box({
+        const body = new Gtk.Box({
             orientation: Gtk.Orientation.VERTICAL,
-            css_classes: ['sc-left-pane'],
-            width_request: 340,
             hexpand: true,
             vexpand: true,
         });
 
-        // Search box
-        const searchBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            css_classes: ['sc-search-box'],
-        });
-        this.#searchEntry = new Gtk.SearchEntry({
-            placeholder_text: 'Search history, apps, colors, links…',
-            hexpand: true,
-        });
-        this.#searchEntry.connect('search-changed', () => {
-            this.#rebuildList();
-        });
-        searchBox.append(this.#searchEntry);
-        left.append(searchBox);
-
-        // Category filter pills
-        const filterScroll = new Gtk.ScrolledWindow({
-            hscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
-            vscrollbar_policy: Gtk.PolicyType.NEVER,
-            propagate_natural_height: true,
-        });
-        const filterBox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 4,
-            css_classes: ['sc-filter-bar'],
-        });
-        for (const cat of CATEGORIES) {
-            const btn = new Gtk.ToggleButton({
-                label: cat.label,
-                active: cat.id === 'all',
-                css_classes: ['flat', 'sc-filter-pill'],
-            });
-            btn.connect('toggled', () => {
-                if (!btn.get_active()) {
-                    if (this.#category === cat.id)
-                        btn.set_active(true);
-                    return;
-                }
-                this.#setCategory(cat.id);
-            });
-            this.#filterButtons.set(cat.id, btn);
-            filterBox.append(btn);
-        }
-        filterScroll.set_child(filterBox);
-        left.append(filterScroll);
-
-        // Private mode banner
         this.#pausedBanner = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
             spacing: 8,
@@ -363,72 +143,83 @@ class SmartClipboardPopupApp {
             xalign: 0,
             hexpand: true,
         }));
-        left.append(this.#pausedBanner);
+        body.append(this.#pausedBanner);
 
-        // List / Empty stack
-        this.#emptyStack = new Gtk.Stack({
-            hexpand: true,
-            vexpand: true,
-        });
+        this.#emptyStack = new Gtk.Stack({hexpand: true, vexpand: true});
 
-        const listScroll = new Gtk.ScrolledWindow({
+        const scroller = new Gtk.ScrolledWindow({
             hscrollbar_policy: Gtk.PolicyType.NEVER,
             vscrollbar_policy: Gtk.PolicyType.AUTOMATIC,
             hexpand: true,
             vexpand: true,
         });
+
         this.#listBox = new Gtk.ListBox({
             selection_mode: Gtk.SelectionMode.SINGLE,
-            activate_on_single_click: false,
+            activate_on_single_click: true,
             css_classes: ['sc-list'],
-        });
-        this.#listBox.connect('row-selected', (_lb, row) => {
-            const entry = row?._scEntry ?? null;
-            this.#selectedId = entry?.id ?? null;
-            this.#preview.setEntry(entry);
         });
         this.#listBox.connect('row-activated', (_lb, row) => {
             if (row?._scEntry)
-                this.#activateEntry(row._scEntry, true);
+                this.#activateEntry(row._scEntry);
         });
-        listScroll.set_child(this.#listBox);
+        scroller.set_child(this.#listBox);
 
         const emptyPage = new Adw.StatusPage({
             icon_name: 'edit-paste-symbolic',
-            title: 'Nothing here yet',
-            description: 'Copy text, code, links, colors, or images to build your history.',
+            title: 'Clipboard is empty',
+            description: 'Copy any text or image to see it here.',
         });
 
-        this.#emptyStack.add_named(listScroll, 'list');
+        this.#emptyStack.add_named(scroller, 'list');
         this.#emptyStack.add_named(emptyPage, 'empty');
-        left.append(this.#emptyStack);
+        body.append(this.#emptyStack);
 
-        return left;
+        this.#toastOverlay = new Adw.ToastOverlay({child: body});
+        toolbarView.set_content(this.#toastOverlay);
+        this.#window.set_content(toolbarView);
     }
 
-    #setCategory(catId) {
-        if (this.#category === catId)
-            return;
-        this.#category = catId;
-        for (const [id, btn] of this.#filterButtons) {
-            if (btn.get_active() !== (id === catId))
-                btn.set_active(id === catId);
-        }
-        this.#rebuildList();
-    }
+    #buildHeaderBar() {
+        const header = new Adw.HeaderBar();
 
-    #applyPreviewVisible(visible, persist) {
-        this.#showPreview = Boolean(visible);
-        this.#preview.widget.set_visible(this.#showPreview);
-        this.#syncingToggles = true;
-        this.#previewToggleBtn.set_active(this.#showPreview);
-        this.#syncingToggles = false;
+        this.#searchEntry = new Gtk.SearchEntry({
+            placeholder_text: 'Search clipboard…',
+            hexpand: true,
+            css_classes: ['sc-search-entry'],
+        });
+        this.#searchEntry.connect('search-changed', () => this.#rebuildList());
+        header.set_title_widget(this.#searchEntry);
 
-        const targetWidth = this.#showPreview ? 860 : 440;
-        this.#window.set_default_size(targetWidth, 560);
+        this.#pauseToggleBtn = new Gtk.ToggleButton({
+            icon_name: 'action-unavailable-symbolic',
+            tooltip_text: 'Private Mode (pause recording)',
+        });
+        this.#pauseToggleBtn.connect('toggled', () => {
+            if (this.#syncingToggles)
+                return;
+            this.#client?.setPaused(this.#pauseToggleBtn.get_active()).catch(() => {});
+        });
 
-        if (persist)
-            this.#client?.setShowPreview(this.#showPreview).catch(() => {});
+        this.#clearBtn = new Gtk.Button({
+            icon_name: 'edit-clear-all-symbolic',
+            tooltip_text: 'Clear unpinned history',
+        });
+        this.#clearBtn.connect('clicked', () => this.#clearUnpinned());
+
+        const prefsBtn = new Gtk.Button({
+            icon_name: 'preferences-system-symbolic',
+            tooltip_text: 'Preferences',
+        });
+        prefsBtn.connect('clicked', () => {
+            this.#hideWindow();
+            this.#client?.openPreferences().catch(() => {});
+        });
+
+        header.pack_end(prefsBtn);
+        header.pack_end(this.#clearBtn);
+        header.pack_end(this.#pauseToggleBtn);
+        return header;
     }
 
     async #refreshFromExtension() {
@@ -436,25 +227,12 @@ class SmartClipboardPopupApp {
             const state = await this.#client.getState();
             this.#entries = Array.isArray(state.entries) ? state.entries : [];
             this.#paused = Boolean(state.paused);
-            this.#autoPaste = state.autoPaste !== undefined ? Boolean(state.autoPaste) : true;
-            this.#keepOpen = Boolean(state.keepOpen);
 
             this.#syncingToggles = true;
             this.#pauseToggleBtn.set_active(this.#paused);
-            this.#keepOpenBtn.set_active(this.#keepOpen);
             this.#syncingToggles = false;
 
-            if (typeof state.showPreview === 'boolean' && state.showPreview !== this.#showPreview)
-                this.#applyPreviewVisible(state.showPreview, false);
-
             this.#pausedBanner.set_visible(this.#paused);
-            this.#preview.setAutoPaste(this.#autoPaste);
-
-            const pinnedCount = this.#entries.filter(e => e.pinned).length;
-            const total = this.#entries.length;
-            this.#titleWidget.set_subtitle(
-                pinnedCount > 0 ? `${total} items · ${pinnedCount} pinned` : `${total} items`
-            );
             this.#clearBtn.set_sensitive(this.#entries.some(e => !e.pinned));
             this.#rebuildList();
         } catch (e) {
@@ -464,7 +242,7 @@ class SmartClipboardPopupApp {
 
     #rebuildList() {
         const query = this.#searchEntry.get_text();
-        this.#filtered = filterEntries(this.#entries, query, this.#category);
+        this.#filtered = filterEntries(this.#entries, query);
 
         let child = this.#listBox.get_first_child();
         while (child) {
@@ -475,146 +253,208 @@ class SmartClipboardPopupApp {
 
         if (this.#filtered.length === 0) {
             this.#emptyStack.set_visible_child_name('empty');
-            this.#preview.setEntry(null);
             return;
         }
 
         this.#emptyStack.set_visible_child_name('list');
 
-        let rowToSelect = null;
         this.#filtered.forEach((entry, idx) => {
-            const row = this.#createRow(entry, idx);
-            this.#listBox.append(row);
-            if (entry.id === this.#selectedId)
-                rowToSelect = row;
+            const featured = idx < FEATURED_COUNT;
+            this.#listBox.append(this.#createCardRow(entry, featured));
         });
 
-        if (!rowToSelect)
-            rowToSelect = this.#listBox.get_row_at_index(0);
-        if (rowToSelect)
-            this.#listBox.select_row(rowToSelect);
+        const firstRow = this.#listBox.get_row_at_index(0);
+        if (firstRow)
+            this.#listBox.select_row(firstRow);
     }
 
-    #createRow(entry, index) {
-        const row = new Gtk.ListBoxRow({
-            css_classes: entry.pinned ? ['sc-row-pinned'] : [],
-        });
+    #createCardRow(entry, featured) {
+        const classes = [];
+        if (featured)
+            classes.push('sc-row-featured');
+        if (entry.pinned)
+            classes.push('sc-row-pinned');
+
+        const row = new Gtk.ListBoxRow({css_classes: classes});
         row._scEntry = entry;
 
-        const hbox = new Gtk.Box({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            spacing: 8,
+        const card = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: featured ? 8 : 4,
             hexpand: true,
         });
 
-        // Visual drag grip
-        hbox.append(new Gtk.Image({
-            icon_name: 'list-drag-handle-symbolic',
-            pixel_size: 14,
-            valign: Gtk.Align.CENTER,
-            css_classes: ['sc-drag-handle'],
-            tooltip_text: 'Drag into any app',
-        }));
+        // Top preview body
+        if (featured)
+            card.append(this.#buildFeaturedBody(entry));
+        else
+            card.append(this.#buildCompactBody(entry));
 
-        // Optional leading color swatch or image thumbnail
+        // Bottom meta + explicit Copy / Pin / Preview / Delete bar
+        card.append(this.#buildCardFooter(entry));
+
+        row.set_child(card);
+        this.#attachRowDragAndDrop(row, entry);
+        return row;
+    }
+
+    #buildFeaturedBody(entry) {
         if (entry.type === 'image') {
-            const thumbPath = entry.thumbPath || entry.imagePath;
+            const frame = new Gtk.Box({
+                css_classes: ['sc-featured-image'],
+                hexpand: true,
+                overflow: Gtk.Overflow.HIDDEN,
+            });
+            const pic = new Gtk.Picture({
+                content_fit: Gtk.ContentFit.CONTAIN,
+                can_shrink: true,
+                hexpand: true,
+                height_request: 170,
+            });
+            const path = entry.imagePath || entry.thumbPath;
+            if (path) {
+                const file = Gio.File.new_for_path(path);
+                if (file.query_exists(null))
+                    pic.set_file(file);
+            }
+            frame.append(pic);
+            return frame;
+        }
+
+        const box = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 6,
+            hexpand: true,
+        });
+
+        if (entry.subtype === 'color') {
+            const swatch = this.#makeColorSwatch(entry.colorValue || entry.text, 'sc-color-swatch-big');
+            if (swatch)
+                box.append(swatch);
+        }
+
+        const label = new Gtk.Label({
+            label: formatTextPreview(entry.text, 5, 360),
+            xalign: 0,
+            lines: 5,
+            wrap: true,
+            wrap_mode: Pango.WrapMode.WORD_CHAR,
+            ellipsize: Pango.EllipsizeMode.END,
+            css_classes: entry.subtype === 'code'
+                ? ['sc-card-text-big', 'monospace']
+                : ['sc-card-text-big'],
+        });
+        box.append(label);
+        return box;
+    }
+
+    #buildCompactBody(entry) {
+        const hbox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 10,
+            hexpand: true,
+        });
+
+        if (entry.type === 'image') {
             const pic = new Gtk.Picture({
                 content_fit: Gtk.ContentFit.COVER,
                 can_shrink: true,
-                width_request: 72,
+                width_request: 68,
                 height_request: 44,
-                css_classes: ['sc-row-thumb'],
+                css_classes: ['sc-compact-thumb'],
                 overflow: Gtk.Overflow.HIDDEN,
             });
-            if (thumbPath) {
-                const f = Gio.File.new_for_path(thumbPath);
-                if (f.query_exists(null))
-                    pic.set_file(f);
+            const path = entry.thumbPath || entry.imagePath;
+            if (path) {
+                const file = Gio.File.new_for_path(path);
+                if (file.query_exists(null))
+                    pic.set_file(file);
             }
             hbox.append(pic);
-        } else if (entry.subtype === 'color') {
-            const dot = new Gtk.Box({
+            hbox.append(new Gtk.Label({
+                label: entry.width && entry.height ? `Image ${entry.width}×${entry.height}` : 'Image',
+                xalign: 0,
+                hexpand: true,
                 valign: Gtk.Align.CENTER,
-                css_classes: ['sc-color-dot'],
-            });
-            const parsed = parseCssColor(entry.colorValue || entry.text);
-            const safeColor = parsed && /^[#a-zA-Z0-9(),.%\s/+-]+$/.test(parsed.css) ? parsed.css : 'transparent';
-            const prov = new Gtk.CssProvider();
-            prov.load_from_string(`.sc-color-dot { background-color: ${safeColor}; }`);
-            dot.get_style_context().add_provider(prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
-            hbox.append(dot);
+                css_classes: ['sc-card-text-compact'],
+            }));
+            return hbox;
         }
 
-        // Main label + metadata column
-        const contentCol = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            spacing: 2,
-            hexpand: true,
-            valign: Gtk.Align.CENTER,
-        });
+        if (entry.subtype === 'color') {
+            const dot = this.#makeColorSwatch(entry.colorValue || entry.text, 'sc-color-swatch-small');
+            if (dot) {
+                dot.set_valign(Gtk.Align.CENTER);
+                hbox.append(dot);
+            }
+        }
 
-        const titleText = entry.type === 'image'
-            ? `Image ${entry.width && entry.height ? `${entry.width}×${entry.height}` : ''}`.trim()
-            : formatTextPreview(entry.text, 2, 110);
-
-        const titleLabel = new Gtk.Label({
-            label: titleText,
+        hbox.append(new Gtk.Label({
+            label: formatTextPreview(entry.text, 2, 130),
             xalign: 0,
             lines: 2,
             wrap: true,
             wrap_mode: Pango.WrapMode.WORD_CHAR,
             ellipsize: Pango.EllipsizeMode.END,
-            css_classes: entry.subtype === 'code' ? ['sc-row-title', 'monospace'] : ['sc-row-title'],
-        });
-        contentCol.append(titleLabel);
+            hexpand: true,
+            css_classes: entry.subtype === 'code'
+                ? ['sc-card-text-compact', 'monospace']
+                : ['sc-card-text-compact'],
+        }));
+        return hbox;
+    }
 
-        const metaParts = [];
+    #buildCardFooter(entry) {
+        const footer = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            hexpand: true,
+        });
+
+        footer.append(new Gtk.Image({
+            icon_name: 'list-drag-handle-symbolic',
+            pixel_size: 13,
+            valign: Gtk.Align.CENTER,
+            css_classes: ['sc-drag-handle'],
+            tooltip_text: 'Drag into any app',
+        }));
+
+        const meta = [];
         if (entry.type === 'image') {
-            metaParts.push(formatBytes(entry.sizeBytes));
+            if (entry.width && entry.height)
+                meta.push(`${entry.width}×${entry.height}`);
+            meta.push(formatBytes(entry.sizeBytes));
         } else {
-            if (entry.isJson)
-                metaParts.push('JSON');
-            else if (entry.subtype && entry.subtype !== 'text')
-                metaParts.push(entry.subtype.toUpperCase());
-            metaParts.push(`${entry.charCount} chars`);
+            meta.push(`${entry.charCount} chars`);
+            if (entry.lineCount > 1)
+                meta.push(`${entry.lineCount} lines`);
         }
         if (entry.sourceApp)
-            metaParts.push(entry.sourceApp);
+            meta.push(entry.sourceApp);
         const rel = formatRelativeTime(entry.updatedAt);
         if (rel)
-            metaParts.push(rel);
+            meta.push(rel);
 
-        contentCol.append(new Gtk.Label({
-            label: metaParts.join(' · '),
+        footer.append(new Gtk.Label({
+            label: meta.join(' · '),
             xalign: 0,
+            hexpand: true,
             ellipsize: Pango.EllipsizeMode.END,
-            css_classes: ['sc-row-meta'],
+            valign: Gtk.Align.CENTER,
+            css_classes: ['sc-card-meta'],
         }));
-        hbox.append(contentCol);
 
-        // Quick Alt+1..9 hint pill
-        if (index < 9) {
-            hbox.append(new Gtk.Label({
-                label: `⌥${index + 1}`,
-                valign: Gtk.Align.CENTER,
-                css_classes: ['sc-shortcut-badge'],
-                tooltip_text: `Press Alt+${index + 1} to paste`,
-            }));
-        }
-
-        // Explicit inline action buttons: Copy, Pin, Preview, Delete
         const actions = new Gtk.Box({
             orientation: Gtk.Orientation.HORIZONTAL,
             spacing: 2,
             valign: Gtk.Align.CENTER,
-            css_classes: ['sc-row-actions'],
+            css_classes: ['sc-card-actions'],
         });
 
         const copyBtn = new Gtk.Button({
             icon_name: 'edit-copy-symbolic',
             css_classes: ['flat'],
-            tooltip_text: 'Copy to clipboard',
+            tooltip_text: 'Copy',
         });
         copyBtn.connect('clicked', () => this.#copyEntryOnly(entry));
 
@@ -628,18 +468,14 @@ class SmartClipboardPopupApp {
         const previewBtn = new Gtk.Button({
             icon_name: 'view-reveal-symbolic',
             css_classes: ['flat'],
-            tooltip_text: 'Preview item',
+            tooltip_text: 'Full preview',
         });
-        previewBtn.connect('clicked', () => {
-            this.#listBox.select_row(row);
-            if (!this.#showPreview)
-                this.#applyPreviewVisible(true, true);
-        });
+        previewBtn.connect('clicked', () => this.#openPreviewDialog(entry));
 
         const delBtn = new Gtk.Button({
             icon_name: 'user-trash-symbolic',
             css_classes: ['flat', 'sc-danger-btn'],
-            tooltip_text: 'Delete item',
+            tooltip_text: 'Delete',
         });
         delBtn.connect('clicked', () => this.#deleteEntry(entry.id));
 
@@ -647,13 +483,130 @@ class SmartClipboardPopupApp {
         actions.append(pinBtn);
         actions.append(previewBtn);
         actions.append(delBtn);
-        hbox.append(actions);
+        footer.append(actions);
+        return footer;
+    }
 
-        row.set_child(hbox);
+    #makeColorSwatch(colorStr, cssClass) {
+        const parsed = parseCssColor(colorStr);
+        if (!parsed || !/^[#a-zA-Z0-9(),.%\s/+-]+$/.test(parsed.css))
+            return null;
+        const box = new Gtk.Box({css_classes: [cssClass]});
+        const prov = new Gtk.CssProvider();
+        prov.load_from_string(`.${cssClass} { background-color: ${parsed.css}; }`);
+        box.get_style_context().add_provider(prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+        return box;
+    }
 
-        // Real Wayland/X11 DragSource for dropping into any external app (plus internal pin reorder)
-        this.#attachRowDragAndDrop(row, entry);
-        return row;
+    #openPreviewDialog(entry) {
+        this.#inModal = true;
+        this.#cancelFocusAutoHide();
+
+        const dialog = new Adw.Dialog({
+            title: entry.type === 'image'
+                ? `Image${entry.width && entry.height ? ` (${entry.width}×${entry.height})` : ''}`
+                : 'Clipboard Preview',
+            content_width: 560,
+            content_height: 460,
+        });
+
+        const view = new Adw.ToolbarView();
+        view.add_top_bar(new Adw.HeaderBar());
+
+        const body = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 12,
+            css_classes: ['sc-dialog-body'],
+            hexpand: true,
+            vexpand: true,
+        });
+
+        if (entry.type === 'image') {
+            const stage = new Gtk.Box({
+                css_classes: ['sc-dialog-image'],
+                hexpand: true,
+                vexpand: true,
+            });
+            const pic = new Gtk.Picture({
+                content_fit: Gtk.ContentFit.CONTAIN,
+                can_shrink: true,
+                hexpand: true,
+                vexpand: true,
+            });
+            const path = entry.imagePath || entry.thumbPath;
+            if (path) {
+                const f = Gio.File.new_for_path(path);
+                if (f.query_exists(null))
+                    pic.set_file(f);
+            }
+            stage.append(pic);
+            body.append(stage);
+        } else {
+            const scroller = new Gtk.ScrolledWindow({
+                hexpand: true,
+                vexpand: true,
+                css_classes: ['sc-dialog-text'],
+            });
+            const buffer = new Gtk.TextBuffer();
+            buffer.set_text(entry.text, -1);
+            const textView = new Gtk.TextView({
+                buffer,
+                editable: false,
+                wrap_mode: Gtk.WrapMode.WORD_CHAR,
+                top_margin: 10,
+                bottom_margin: 10,
+                left_margin: 12,
+                right_margin: 12,
+                css_classes: entry.subtype === 'code' ? ['monospace'] : [],
+            });
+            scroller.set_child(textView);
+            body.append(scroller);
+        }
+
+        const btnBar = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8,
+            halign: Gtk.Align.END,
+        });
+
+        if (entry.type === 'text' && (entry.isUrl || entry.subtype === 'url')) {
+            const openUrlBtn = new Gtk.Button({label: 'Open Link'});
+            openUrlBtn.connect('clicked', () => {
+                Gio.AppInfo.launch_default_for_uri_async(entry.text.trim(), null, null, null);
+                dialog.close();
+            });
+            btnBar.append(openUrlBtn);
+        }
+
+        const pinBtn = new Gtk.Button({
+            label: entry.pinned ? 'Unpin' : 'Pin',
+            icon_name: 'view-pin-symbolic',
+        });
+        pinBtn.connect('clicked', () => {
+            this.#togglePin(entry.id);
+            dialog.close();
+        });
+
+        const copyBtn = new Gtk.Button({
+            label: 'Copy',
+            icon_name: 'edit-copy-symbolic',
+            css_classes: ['suggested-action'],
+        });
+        copyBtn.connect('clicked', () => {
+            dialog.close();
+            this.#activateEntry(entry);
+        });
+
+        btnBar.append(pinBtn);
+        btnBar.append(copyBtn);
+        body.append(btnBar);
+
+        view.set_content(body);
+        dialog.set_child(view);
+        dialog.connect('closed', () => {
+            this.#inModal = false;
+        });
+        dialog.present(this.#window);
     }
 
     #attachRowDragAndDrop(row, entry) {
@@ -676,7 +629,7 @@ class SmartClipboardPopupApp {
                         src.set_icon(Gdk.Texture.new_from_filename(path), 12, 12);
                         return;
                     } catch {
-                        // fall through to badge
+                        // fallback to label badge
                     }
                 }
             }
@@ -698,7 +651,6 @@ class SmartClipboardPopupApp {
         });
         row.add_controller(dragSource);
 
-        // Pinned rows accept drops from other pinned rows to reorder
         if (entry.pinned) {
             const dropTarget = Gtk.DropTargetAsync.new(
                 Gdk.ContentFormats.new([PIN_DRAG_MIME]),
@@ -709,9 +661,7 @@ class SmartClipboardPopupApp {
                 return Gdk.DragAction.MOVE;
             });
             dropTarget.connect('drag-motion', () => Gdk.DragAction.MOVE);
-            dropTarget.connect('drag-leave', () => {
-                row.remove_css_class('sc-drop-target');
-            });
+            dropTarget.connect('drag-leave', () => row.remove_css_class('sc-drop-target'));
             dropTarget.connect('drop', (_target, drop) => {
                 row.remove_css_class('sc-drop-target');
                 drop.read_async([PIN_DRAG_MIME], GLib.PRIORITY_DEFAULT, null, (d, res) => {
@@ -733,11 +683,6 @@ class SmartClipboardPopupApp {
         }
     }
 
-    #getSelectedEntry() {
-        const row = this.#listBox.get_selected_row();
-        return row?._scEntry ?? null;
-    }
-
     #moveSelection(delta) {
         if (this.#filtered.length === 0)
             return;
@@ -753,22 +698,10 @@ class SmartClipboardPopupApp {
     }
 
     #onKeyPressed(keyval, state) {
-        const ctrl = (state & Gdk.ModifierType.CONTROL_MASK) !== 0;
-        const shift = (state & Gdk.ModifierType.SHIFT_MASK) !== 0;
-        const alt = (state & Gdk.ModifierType.ALT_MASK) !== 0;
-
-        if (this.#preview.isEditing) {
-            if (keyval === Gdk.KEY_Escape) {
-                this.#preview.cancelEdit();
-                this.#searchEntry.grab_focus();
-                return true;
-            }
-            if (ctrl && (keyval === Gdk.KEY_Return || keyval === Gdk.KEY_s)) {
-                this.#preview.commitEdit();
-                return true;
-            }
+        if (this.#inModal)
             return false;
-        }
+
+        const ctrl = (state & Gdk.ModifierType.CONTROL_MASK) !== 0;
 
         if (keyval === Gdk.KEY_Escape) {
             if (this.#searchEntry.get_text().length > 0) {
@@ -777,24 +710,6 @@ class SmartClipboardPopupApp {
             }
             this.#hideWindow();
             return true;
-        }
-
-        // Alt+1..9 instant paste
-        if (alt && keyval >= Gdk.KEY_1 && keyval <= Gdk.KEY_9) {
-            const idx = keyval - Gdk.KEY_1;
-            if (idx < this.#filtered.length) {
-                this.#activateEntry(this.#filtered[idx], true);
-                return true;
-            }
-        }
-
-        // Ctrl+1..7 category switch
-        if (ctrl && keyval >= Gdk.KEY_1 && keyval <= Gdk.KEY_7) {
-            const idx = keyval - Gdk.KEY_1;
-            if (CATEGORIES[idx]) {
-                this.#setCategory(CATEGORIES[idx].id);
-                return true;
-            }
         }
 
         if (keyval === Gdk.KEY_Down || (ctrl && keyval === Gdk.KEY_n)) {
@@ -806,83 +721,37 @@ class SmartClipboardPopupApp {
             return true;
         }
 
+        const selected = this.#listBox.get_selected_row()?._scEntry ?? null;
         if (keyval === Gdk.KEY_Return || keyval === Gdk.KEY_KP_Enter) {
-            const entry = this.#getSelectedEntry();
-            if (entry) {
-                if (shift && entry.type === 'text')
-                    this.#copyPlainText(transformText(entry.text, 'single-line'), true);
-                else
-                    this.#activateEntry(entry, true);
+            if (selected) {
+                this.#activateEntry(selected);
                 return true;
             }
         }
-
-        if (ctrl && keyval === Gdk.KEY_p) {
-            const entry = this.#getSelectedEntry();
-            if (entry) {
-                this.#togglePin(entry.id);
-                return true;
-            }
-        }
-
-        if (ctrl && keyval === Gdk.KEY_e) {
-            const entry = this.#getSelectedEntry();
-            if (entry && entry.type === 'text') {
-                if (!this.#showPreview)
-                    this.#applyPreviewVisible(true, true);
-                this.#preview.startEdit();
-                return true;
-            }
-        }
-
-        if (ctrl && keyval === Gdk.KEY_backslash) {
-            this.#applyPreviewVisible(!this.#showPreview, true);
+        if (ctrl && keyval === Gdk.KEY_p && selected) {
+            this.#togglePin(selected.id);
             return true;
         }
-
-        if (ctrl && keyval === Gdk.KEY_c) {
-            const focus = this.#window.get_focus();
-            const isSearchFocused = focus === this.#searchEntry || focus?.get_parent?.() === this.#searchEntry;
-            const hasSearchSelection = isSearchFocused && this.#searchEntry.get_selection_bounds?.()[0];
-            if (!hasSearchSelection) {
-                const entry = this.#getSelectedEntry();
-                if (entry) {
-                    this.#copyEntryOnly(entry);
-                    return true;
-                }
-            }
-        }
-
         if (ctrl && keyval === Gdk.KEY_z && this.#searchEntry.get_text().length === 0) {
             this.#undoDelete();
             return true;
         }
-
-        if (keyval === Gdk.KEY_Delete || keyval === Gdk.KEY_KP_Delete) {
-            const textLen = this.#searchEntry.get_text().length;
-            if (shift || textLen === 0) {
-                const entry = this.#getSelectedEntry();
-                if (entry) {
-                    this.#deleteEntry(entry.id);
-                    return true;
-                }
-            }
+        if ((keyval === Gdk.KEY_Delete || keyval === Gdk.KEY_KP_Delete) &&
+            selected && this.#searchEntry.get_text().length === 0) {
+            this.#deleteEntry(selected.id);
+            return true;
         }
-
         return false;
     }
 
-    async #activateEntry(entry, paste) {
+    async #activateEntry(entry) {
         if (!entry)
             return;
-        if (!this.#keepOpen)
-            this.#hideWindow();
+        this.#hideWindow();
         try {
-            await this.#client.copyEntry(entry.id, paste && !this.#keepOpen);
-            if (this.#keepOpen)
-                this.#showToast('Copied to clipboard');
+            await this.#client.copyEntry(entry.id, true);
         } catch (e) {
-            this.#showToast(`Copy failed: ${e.message}`);
+            console.warn(`[smart-clipboard-popup] Copy failed: ${e.message}`);
         }
     }
 
@@ -892,19 +761,7 @@ class SmartClipboardPopupApp {
         try {
             const ok = await this.#client.copyEntry(entry.id, false);
             if (ok)
-                this.#showToast('Copied to clipboard');
-        } catch (e) {
-            this.#showToast(`Copy failed: ${e.message}`);
-        }
-    }
-
-    async #copyPlainText(text, closeAndPaste, toastMsg = 'Copied to clipboard') {
-        if (closeAndPaste && !this.#keepOpen)
-            this.#hideWindow();
-        try {
-            const ok = await this.#client.copyText(text, closeAndPaste && !this.#keepOpen);
-            if (ok && (!closeAndPaste || this.#keepOpen))
-                this.#showToast(toastMsg);
+                this.#showToast('Copied');
         } catch (e) {
             this.#showToast(`Copy failed: ${e.message}`);
         }
@@ -913,19 +770,9 @@ class SmartClipboardPopupApp {
     async #togglePin(id) {
         try {
             const pinned = await this.#client.togglePin(id);
-            this.#showToast(pinned ? 'Pinned to top' : 'Unpinned');
+            this.#showToast(pinned ? 'Pinned' : 'Unpinned');
         } catch (e) {
             this.#showToast(`Pin failed: ${e.message}`);
-        }
-    }
-
-    async #saveEdit(id, newText) {
-        try {
-            const ok = await this.#client.updateText(id, newText);
-            if (ok)
-                this.#showToast('Snippet updated');
-        } catch (e) {
-            this.#showToast(`Update failed: ${e.message}`);
         }
     }
 
@@ -943,7 +790,7 @@ class SmartClipboardPopupApp {
         try {
             const count = await this.#client.clearUnpinned();
             if (count > 0)
-                this.#showUndoToast(`Cleared ${count} unpinned ${count === 1 ? 'item' : 'items'}`);
+                this.#showUndoToast(`Cleared ${count} ${count === 1 ? 'item' : 'items'}`);
         } catch (e) {
             this.#showToast(`Clear failed: ${e.message}`);
         }
@@ -953,47 +800,34 @@ class SmartClipboardPopupApp {
         try {
             const restored = await this.#client.undoDelete();
             if (restored > 0)
-                this.#showToast(`Restored ${restored} ${restored === 1 ? 'item' : 'items'}`);
+                this.#showToast(`Restored ${restored}`);
         } catch {
             // ignore
         }
     }
 
     #showToast(message) {
-        if (!this.#toastOverlay)
-            return;
-        this.#toastOverlay.add_toast(new Adw.Toast({
-            title: message,
-            timeout: 2,
-        }));
+        this.#toastOverlay?.add_toast(new Adw.Toast({title: message, timeout: 2}));
     }
 
     #showUndoToast(message) {
-        if (!this.#toastOverlay)
-            return;
         const toast = new Adw.Toast({
             title: message,
             button_label: 'Undo',
             timeout: 5,
         });
         toast.connect('button-clicked', () => this.#undoDelete());
-        this.#toastOverlay.add_toast(toast);
+        this.#toastOverlay?.add_toast(toast);
     }
 
     #scheduleFocusAutoHide() {
         this.#cancelFocusAutoHide();
-        if (this.#keepOpen || this.#isDragging || this.#inModal || this.#preview?.isEditing)
+        if (this.#isDragging || this.#inModal)
             return;
         this.#hideTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 140, () => {
             this.#hideTimerId = 0;
-            if (this.#window?.visible &&
-                !this.#window.is_active &&
-                !this.#keepOpen &&
-                !this.#isDragging &&
-                !this.#inModal &&
-                !this.#preview?.isEditing) {
+            if (this.#window?.visible && !this.#window.is_active && !this.#isDragging && !this.#inModal)
                 this.#hideWindow();
-            }
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -1016,9 +850,7 @@ class SmartClipboardPopupApp {
         if (!this.#window)
             return;
         this.#cancelFocusAutoHide();
-        this.#preview.cancelEdit();
         this.#searchEntry.set_text('');
-        this.#setCategory('all');
         this.#refreshFromExtension();
         this.#window.present();
         this.#searchEntry.grab_focus();
@@ -1026,8 +858,6 @@ class SmartClipboardPopupApp {
 
     #hideWindow() {
         this.#cancelFocusAutoHide();
-        if (this.#preview?.isEditing)
-            this.#preview.cancelEdit();
         this.#window?.set_visible(false);
     }
 

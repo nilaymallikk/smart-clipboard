@@ -51,13 +51,7 @@
     <key name="auto-paste" type="b">
       <default>true</default>
       <summary>Auto-paste on selection</summary>
-      <description>Automatically send Ctrl+V (or Ctrl+Shift+V in terminals) to the previous window when pressing Enter or double-clicking an item.</description>
-    </key>
-
-    <key name="show-preview-pane" type="b">
-      <default>true</default>
-      <summary>Show live preview pane</summary>
-      <description>Display the right-hand preview pane for full text, color swatches, and full-size images.</description>
+      <description>Automatically send Ctrl+V (or Ctrl+Shift+V in terminals) to the previous window when clicking or pressing Enter on an item.</description>
     </key>
 
     <key name="wipe-nonce" type="x">

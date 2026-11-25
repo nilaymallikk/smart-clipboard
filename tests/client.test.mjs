@@ -10,7 +10,6 @@ import {
     formatRelativeTime,
     formatTextPreview,
     parseCssColor,
-    transformText,
 } from '../popupClient.js';
 
 function assert(cond, msg) {
@@ -30,16 +29,9 @@ try {
     assert(formatRelativeTime(now - 30 * 3_600_000, now) === 'Yesterday', 'yesterday');
 
     // Text preview collapsing & truncation
-    assert(formatTextPreview('  line 1 \n\n  line 2 \n line 3 ') === 'line 1 ↵ line 2', 'collapses to 2 lines');
+    assert(formatTextPreview('  line 1 \n\n  line 2 \n line 3 ') === 'line 1\nline 2', 'preserves clean 2 lines');
+    assert(formatTextPreview('  line 1 \n\n  line 2 ', 2, 140, ' ↵ ') === 'line 1 ↵ line 2', 'supports custom separator');
     assert(formatTextPreview('a'.repeat(200), 2, 20).endsWith('…'), 'ellipsizes long preview');
-
-    // Transforms
-    assert(transformText('  hello\n\tworld  ', 'single-line') === 'hello world', 'single-line transform');
-    assert(transformText('  abc  ', 'trim') === 'abc', 'trim transform');
-    assert(transformText('AbC', 'upper') === 'ABC', 'upper transform');
-    assert(transformText('AbC', 'lower') === 'abc', 'lower transform');
-    assert(transformText('{"a":1,"b":[2,3]}', 'format-json') === '{\n  "a": 1,\n  "b": [\n    2,\n    3\n  ]\n}', 'format-json');
-    assert(transformText('hello%20world', 'url-decode') === 'hello world', 'url-decode');
 
     // Color parsing
     const hex6 = parseCssColor('#3584e4');

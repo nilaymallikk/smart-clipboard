@@ -1,10 +1,10 @@
 {
   "uuid": "smart-clipboard@nilaymallik.local",
   "name": "Smart Clipboard",
-  "description": "Fast, keyboard-first clipboard manager for GNOME with live text/image preview, pin/copy actions, auto-paste, and Wayland drag-and-drop",
+  "description": "One-click clipboard manager for GNOME with big vertical top-3 previews, pin/copy actions, auto-paste, and drag-and-drop",
   "shell-version": [
     "51"
   ],
   "settings-schema": "org.gnome.shell.extensions.smart-clipboard",
-  "version-name": "2.0.0"
+  "version-name": "2.1.0"
 }

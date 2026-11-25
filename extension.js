@@ -31,7 +31,6 @@ export default class SmartClipboardExtension extends Extension {
         this._popupProc = null;
         this._lastFocusWindow = null;
         this._virtualKeyboard = null;
-        this._keepOpen = false;
 
         this._store = new HistoryStore({
             uuid: this.uuid,
@@ -56,9 +55,6 @@ export default class SmartClipboardExtension extends Extension {
                 entries: this._store.getSerializableEntries(),
                 paused: this._settings.get_boolean('private-mode'),
                 autoPaste: this._settings.get_boolean('auto-paste'),
-                showPreview: this._settings.get_boolean('show-preview-pane'),
-                keepOpen: this._keepOpen,
-                canUndo: this._store.canUndo,
             }),
             copyEntry: async (id, paste) => {
                 const entry = this._store.getEntry(id);
@@ -69,31 +65,12 @@ export default class SmartClipboardExtension extends Extension {
                     this._scheduleAutoPaste();
                 return ok;
             },
-            copyText: async (text, paste) => {
-                const ok = this._watcher.copyPlainText(text);
-                if (ok && paste && this._settings.get_boolean('auto-paste'))
-                    this._scheduleAutoPaste();
-                return ok;
-            },
             togglePin: id => this._store.togglePin(id),
             reorderPinned: (sourceId, targetId) => this._store.reorderPinned(sourceId, targetId),
-            updateText: (id, newText) => Boolean(this._store.updateText(id, newText)),
             deleteEntry: id => this._store.deleteItem(id),
             clearUnpinned: () => this._store.clearUnpinned(),
             undoDelete: () => this._store.undoLastDelete(),
             setPaused: paused => this._settings.set_boolean('private-mode', paused),
-            setShowPreview: show => this._settings.set_boolean('show-preview-pane', show),
-            setKeepOpen: keepOpen => {
-                this._keepOpen = Boolean(keepOpen);
-                const win = this._findPopupWindow();
-                if (win) {
-                    if (this._keepOpen)
-                        win.make_above();
-                    else
-                        win.unmake_above();
-                }
-                this._dbusService?.emitChanged();
-            },
             openPreferences: () => this.openPreferences(),
         });
 
@@ -368,10 +345,6 @@ export default class SmartClipboardExtension extends Extension {
             this._dbusService?.emitChanged();
             break;
         }
-
-        case 'show-preview-pane':
-            this._dbusService?.emitChanged();
-            break;
 
         case 'wipe-nonce':
             this._store.wipeAll().catch(e => {

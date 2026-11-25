@@ -1,7 +1,7 @@
 UUID := smart-clipboard@nilaymallik.local
 EXT_DIR := $(HOME)/.local/share/gnome-shell/extensions/$(UUID)
 SCHEMA_DIR := schemas
-JS_FILES := extension.js prefs.js clipboardWatcher.js historyStore.js dbusService.js popupUi.js popupClient.js popupPreview.js popupApp.js
+JS_FILES := extension.js prefs.js clipboardWatcher.js historyStore.js dbusService.js popupUi.js popupClient.js popupApp.js
 
 .PHONY: all compile-schemas install uninstall check test-headless
 
