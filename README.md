@@ -1,27 +1,29 @@
 # Smart Clipboard
 
-Simple, one-click clipboard history for GNOME Shell 51 — click the panel icon or press **Super+V** to see big vertical previews of your top 3 items, copy or pin in one click, and drag items straight into any app.
+Simple, one-click clipboard bar for GNOME Shell 51 — click the top-bar icon or press **Super+V** to open a sleek top-right floating overlay with 3 big preview tiles, a **Text** filter tile, and an expandable **`>`** full history drawer.
 
 ## Features
 
-- **One-click clipboard**: click the top-bar icon or press **Super+V**, click any item to copy & paste it immediately
-- **Top 3 big vertical previews**: the 3 most recent/pinned items show large image previews, multi-line text previews, or color swatches right away; older items scroll compactly below
-- **Simple actions on every card**: **Copy**, **Pin**, **Full Preview** (lightbox for full-size images or long text), and **Delete** (with 5-second **Undo** toast)
-- **Easy drag-and-drop**: drag any card straight into browsers, Slack, Discord, Files, GIMP, or editors; drag pinned items to reorder
-- **Fast search**: type to filter across text, images, and source app name
-- **Privacy**: skips password managers automatically, plus one-click Private Mode and Clear Unpinned
+- **Sleek floating 3-tile preview bar**: opens right under the top-right panel with 3 large preview tiles (images, code/text, color swatches) + a right-side **`T` Text** filter tile
+- **One-click copy & paste**: single-click any tile (or press `1`–`3` / `Enter`) to copy, close, and auto-paste into your previous app (`Ctrl+V`, or `Ctrl+Shift+V` in terminals)
+- **Hover actions on every tile**: **Copy** (without closing), **Pin**, **Full Preview** (lightbox for full-res images or long text), and **Delete** (with 5-second **Undo** toast)
+- **Easy drag-and-drop**: drag any tile or history row straight into browsers, Slack, Discord, Files, GIMP, or editors; drag pinned items to reorder
+- **Expandable history (`>`)**: click `>` (or press `Down`) to reveal search, older history items, Private Mode, Clear Unpinned, and Preferences
+- **Privacy**: skips password managers automatically, plus Private Mode
 
 ## Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Super+V` | Open / close clipboard (configurable) |
-| Click / `Enter` | Copy & auto-paste into previous app |
-| `Up` / `Down` | Move selection |
+| Click / `Enter` / `1`–`3` | Copy & auto-paste tile |
+| `Left` / `Right` | Move selection across the 3 preview tiles |
+| `Down` | Expand full history & search drawer |
+| `Space` | Open full-size preview for selected tile |
 | `Ctrl+P` | Pin / unpin selected item |
 | `Delete` | Delete selected item |
 | `Ctrl+Z` | Undo last delete |
-| `Escape` | Clear search or close |
+| `Escape` | Clear search, collapse drawer, or close |
 
 ## Install
 

@@ -29,6 +29,8 @@ export default class SmartClipboardExtension extends Extension {
         this._pasteTimeoutId = 0;
         this._activateTimeoutId = 0;
         this._popupProc = null;
+        this._popupWin = null;
+        this._popupSizeId = 0;
         this._lastFocusWindow = null;
         this._virtualKeyboard = null;
 
@@ -55,6 +57,7 @@ export default class SmartClipboardExtension extends Extension {
                 entries: this._store.getSerializableEntries(),
                 paused: this._settings.get_boolean('private-mode'),
                 autoPaste: this._settings.get_boolean('auto-paste'),
+                shortcut: this._settings.get_strv(SHORTCUT_KEY)[0] ?? '<Super>v',
             }),
             copyEntry: async (id, paste) => {
                 const entry = this._store.getEntry(id);
@@ -134,17 +137,42 @@ export default class SmartClipboardExtension extends Extension {
         return null;
     }
 
-    _preparePopupWindow(win) {
+    _positionPopupWindow(win) {
         try {
-            win.make_above();
             const monitorIdx = global.display.get_current_monitor();
             const workArea = Main.layoutManager.getWorkAreaForMonitor(monitorIdx);
             const rect = win.get_frame_rect();
             if (workArea && rect.width > 0 && rect.height > 0) {
-                const x = Math.round(workArea.x + (workArea.width - rect.width) / 2);
-                const y = Math.round(workArea.y + Math.min(80, Math.max(16, (workArea.height - rect.height) / 4)));
+                const x = Math.max(
+                    workArea.x + 8,
+                    Math.round(workArea.x + workArea.width - rect.width - 16)
+                );
+                const y = Math.round(workArea.y + 8);
                 win.move_frame(false, x, y);
             }
+        } catch {
+            // ignore positioning error
+        }
+    }
+
+    _preparePopupWindow(win) {
+        try {
+            if (this._popupWin !== win) {
+                if (this._popupWin && this._popupSizeId !== 0) {
+                    try {
+                        this._popupWin.disconnect(this._popupSizeId);
+                    } catch {
+                        // ignore
+                    }
+                    this._popupSizeId = 0;
+                }
+                this._popupWin = win;
+                this._popupSizeId = win.connect('size-changed', () => {
+                    this._positionPopupWindow(win);
+                });
+            }
+            win.make_above();
+            this._positionPopupWindow(win);
             win.activate(global.get_current_time());
         } catch (e) {
             console.warn(`[smart-clipboard] Failed to position/activate popup: ${e.message}`);
@@ -376,6 +404,16 @@ export default class SmartClipboardExtension extends Extension {
             this._settings.disconnect(this._settingsChangedId);
             this._settingsChangedId = 0;
         }
+
+        if (this._popupWin && this._popupSizeId !== 0) {
+            try {
+                this._popupWin.disconnect(this._popupSizeId);
+            } catch {
+                // ignore
+            }
+            this._popupSizeId = 0;
+        }
+        this._popupWin = null;
 
         this._quitPopupProcess();
 
