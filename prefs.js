@@ -7,6 +7,7 @@ import Gtk from 'gi://Gtk';
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 const DEFAULT_SHORTCUT = '<Super>v';
+const SHORTCUT_KEY = 'smart-clipboard-toggle';
 
 function formatBytes(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0)
@@ -274,11 +275,11 @@ export default class SmartClipboardPreferences extends ExtensionPreferences {
         });
 
         const updateShortcutLabel = () => {
-            const list = settings.get_strv('toggle-shortcut');
+            const list = settings.get_strv(SHORTCUT_KEY);
             shortcutLabel.set_accelerator(list[0] ?? '');
         };
         updateShortcutLabel();
-        const shortcutSignalId = settings.connect('changed::toggle-shortcut', updateShortcutLabel);
+        const shortcutSignalId = settings.connect(`changed::${SHORTCUT_KEY}`, updateShortcutLabel);
 
         const changeShortcutBtn = new Gtk.Button({
             label: 'Change…',
@@ -381,7 +382,7 @@ export default class SmartClipboardPreferences extends ExtensionPreferences {
             wrap: true,
         });
 
-        const current = settings.get_strv('toggle-shortcut')[0] ?? '';
+        const current = settings.get_strv(SHORTCUT_KEY)[0] ?? '';
         const preview = new Adw.ShortcutLabel({
             accelerator: current,
             disabled_text: 'Disabled',
@@ -393,7 +394,7 @@ export default class SmartClipboardPreferences extends ExtensionPreferences {
             halign: Gtk.Align.CENTER,
         });
         resetBtn.connect('clicked', () => {
-            settings.set_strv('toggle-shortcut', [DEFAULT_SHORTCUT]);
+            settings.set_strv(SHORTCUT_KEY, [DEFAULT_SHORTCUT]);
             dialog.close();
         });
 
@@ -416,7 +417,7 @@ export default class SmartClipboardPreferences extends ExtensionPreferences {
             }
 
             if (mask === 0 && keyval === Gdk.KEY_BackSpace) {
-                settings.set_strv('toggle-shortcut', []);
+                settings.set_strv(SHORTCUT_KEY, []);
                 dialog.close();
                 return Gdk.EVENT_STOP;
             }
@@ -426,7 +427,7 @@ export default class SmartClipboardPreferences extends ExtensionPreferences {
 
             const accel = Gtk.accelerator_name(keyval, mask);
             if (accel) {
-                settings.set_strv('toggle-shortcut', [accel]);
+                settings.set_strv(SHORTCUT_KEY, [accel]);
                 dialog.close();
             }
             return Gdk.EVENT_STOP;

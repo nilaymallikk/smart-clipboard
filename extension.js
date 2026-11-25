@@ -17,7 +17,7 @@ import {
 import {HistoryStore} from './historyStore.js';
 import {SmartClipboardIndicator} from './popupUi.js';
 
-const SHORTCUT_KEY = 'toggle-shortcut';
+const SHORTCUT_KEY = 'smart-clipboard-toggle';
 const SHELL_KEYBINDINGS_SCHEMA = 'org.gnome.shell.keybindings';
 const MESSAGE_TRAY_KEY = 'toggle-message-tray';
 const AUTO_PASTE_DELAY_MS = 110;
@@ -101,7 +101,7 @@ export default class SmartClipboardExtension extends Extension {
             SHORTCUT_KEY,
             this._settings,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
-            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW | Shell.ActionMode.POPUP,
             () => this._togglePopup()
         );
 
@@ -472,7 +472,7 @@ export default class SmartClipboardExtension extends Extension {
             break;
         }
 
-        case 'toggle-shortcut':
+        case SHORTCUT_KEY:
             this._restoreToggleShortcut();
             this._claimToggleShortcut();
             this._dbusService?.emitChanged();

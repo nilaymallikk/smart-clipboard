@@ -50,7 +50,7 @@ make test-headless # isolated headless GNOME Shell 51 enable/disable test
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `toggle-shortcut` | `<Super>v` | Global toggle |
+| `smart-clipboard-toggle` | `<Super>v` | Global toggle |
 | `max-text-history` | `50` | Unpinned text entries kept |
 | `max-image-history` | `20` | Unpinned image entries kept |
 | `max-image-size-mb` | `10` | Largest image stored |

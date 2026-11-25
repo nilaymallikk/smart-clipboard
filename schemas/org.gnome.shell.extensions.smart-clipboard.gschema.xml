@@ -24,7 +24,7 @@
       <description>Images larger than this size in megabytes are skipped.</description>
     </key>
 
-    <key name="toggle-shortcut" type="as">
+    <key name="smart-clipboard-toggle" type="as">
       <default>['&lt;Super&gt;v']</default>
       <summary>Shortcut to toggle Smart Clipboard popup</summary>
       <description>Global keybinding to open or close the Smart Clipboard menu.</description>
